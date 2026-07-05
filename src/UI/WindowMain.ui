@@ -109,38 +109,76 @@
      <string>version</string>
     </property>
    </widget>
-   <widget class="QWidget" name="layoutWidget">
-    <property name="geometry">
-     <rect>
-      <x>110</x>
-      <y>500</y>
-      <width>343</width>
-      <height>18</height>
-     </rect>
-    </property>
-    <layout class="QHBoxLayout" name="horizontalLayout">
-     <item>
-      <widget class="QLabel" name="label_2">
-       <property name="text">
-        <string>项目源码：</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QLabel" name="label">
-       <property name="text">
-        <string>&lt;a href=&quot;https://github.com/Theresa-0328/MHY_Scanner&quot;&gt;https://github.com/Theresa-0328/MHY_Scanner</string>
-       </property>
-       <property name="scaledContents">
-        <bool>false</bool>
-       </property>
+    <widget class="QWidget" name="layoutWidget">
+     <property name="geometry">
+      <rect>
+       <x>115</x>
+       <y>488</y>
+       <width>370</width>
+       <height>48</height>
+      </rect>
+     </property>
+     <layout class="QGridLayout" name="gridLayoutSourceLinks">
+      <property name="leftMargin">
+       <number>0</number>
+      </property>
+      <property name="topMargin">
+       <number>0</number>
+      </property>
+      <property name="rightMargin">
+       <number>0</number>
+      </property>
+      <property name="bottomMargin">
+       <number>0</number>
+      </property>
+      <property name="horizontalSpacing">
+       <number>6</number>
+      </property>
+      <property name="verticalSpacing">
+       <number>2</number>
+      </property>
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_2">
+        <property name="text">
+         <string>源项目：</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QLabel" name="label">
+        <property name="text">
+         <string>&lt;a href=&quot;https://github.com/DSVVA/MHY_Scanner&quot;&gt;https://github.com/DSVVA/MHY_Scanner&lt;/a&gt;</string>
+        </property>
+        <property name="scaledContents">
+         <bool>false</bool>
+        </property>
        <property name="openExternalLinks">
         <bool>true</bool>
-       </property>
-      </widget>
-     </item>
-    </layout>
-   </widget>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_4">
+        <property name="text">
+         <string>二改项目：</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLabel" name="label_5">
+        <property name="text">
+         <string>&lt;a href=&quot;https://github.com/loqwe/MHY_Scanner2&quot;&gt;https://github.com/loqwe/MHY_Scanner2&lt;/a&gt;</string>
+        </property>
+        <property name="scaledContents">
+         <bool>false</bool>
+        </property>
+        <property name="openExternalLinks">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
    <widget class="QTableWidget" name="tableWidget">
     <property name="geometry">
      <rect>

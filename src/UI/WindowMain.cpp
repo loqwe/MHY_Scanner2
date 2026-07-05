@@ -33,7 +33,7 @@ WindowMain::WindowMain(QWidget* parent) :
         WindowAbout.exec();
     });
     connect(ui.action2_2, &QAction::triggered, this, []() {
-        ShellExecuteW(NULL, L"open", L"https://github.com/Theresa-0328/MHY_Scanner/issues", NULL, NULL, SW_SHOWNORMAL);
+        ShellExecuteW(NULL, L"open", L"https://github.com/loqwe/MHY_Scanner2/issues", NULL, NULL, SW_SHOWNORMAL);
     });
     connect(ui.action1_5, &QAction::triggered, this, []() {
         ShellExecuteW(NULL, L"open", L"config", NULL, NULL, SW_SHOWDEFAULT);
