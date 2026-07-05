@@ -1,6 +1,6 @@
 ﻿cmake_minimum_required(VERSION 3.26)
 project(MHY_Scanner
-	VERSION 1.1.15
+	VERSION 1.16.1
 	LANGUAGES CXX
 )
 
@@ -94,6 +94,7 @@ add_executable(${PROJECT_NAME}
 	"${CMAKE_SOURCE_DIR}/src/Core/ScannerBase.hpp"
 	"${CMAKE_SOURCE_DIR}/src/Core/compile_string.hpp"
 	"${CMAKE_SOURCE_DIR}/src/Core/ApiDefs.hpp"
+	"${CMAKE_SOURCE_DIR}/src/Core/UrlQuery.hpp"
 )
 
 if(NOT DEV)

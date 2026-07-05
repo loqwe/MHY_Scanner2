@@ -5,19 +5,96 @@
 #include <regex>
 #include <random>
 #include <chrono>
+#include <cctype>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 #include <cpr/cpr.h>
 
+namespace
+{
+const std::string kBiliUserAgent =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "Chrome/126.0.0.0 Safari/537.36";
+
+std::string Trim(std::string value)
+{
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+    {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+    {
+        value.pop_back();
+    }
+    return value;
+}
+
+std::string NormalizeBiliRoomID(std::string value)
+{
+    value = Trim(std::move(value));
+    std::smatch match;
+    const std::regex liveUrlPattern(R"(live\.bilibili\.com/(?:blanc/)?(\d+))", std::regex::icase);
+    if (std::regex_search(value, match, liveUrlPattern) && match.size() > 1)
+    {
+        return match[1].str();
+    }
+    const std::regex queryPattern(R"((?:[?&](?:room_id|id)=)(\d+))", std::regex::icase);
+    if (std::regex_search(value, match, queryPattern) && match.size() > 1)
+    {
+        return match[1].str();
+    }
+    return value;
+}
+
+cpr::Header BiliHeaders(const std::string& roomID)
+{
+    const std::string referer = roomID.empty()
+        ? "https://live.bilibili.com/"
+        : std::format("https://live.bilibili.com/{}", roomID);
+    return cpr::Header{
+        { "User-Agent", kBiliUserAgent },
+        { "Referer", referer },
+        { "Origin", "https://live.bilibili.com" },
+        { "Accept", "application/json, text/plain, */*" },
+    };
+}
+
+std::string BuildBiliStreamUrl(const nlohmann::json& codec)
+{
+    if (!codec.contains("base_url") || !codec.contains("url_info") || !codec["url_info"].is_array())
+    {
+        return "";
+    }
+    const std::string baseUrl = codec["base_url"].get<std::string>();
+    for (const auto& urlInfo : codec["url_info"])
+    {
+        if (!urlInfo.contains("host") || !urlInfo.contains("extra"))
+        {
+            continue;
+        }
+        const std::string host = urlInfo["host"].get<std::string>();
+        const std::string extra = urlInfo["extra"].get<std::string>();
+        if (!host.empty() && !baseUrl.empty())
+        {
+            return host + baseUrl + extra;
+        }
+    }
+    return "";
+}
+}
+
 LiveBili::LiveBili(const std::string& roomID) :
-    roomID(roomID)
+    roomID(NormalizeBiliRoomID(roomID))
 {
 }
 
 LiveStreamInfo LiveBili::GetLiveStreamInfo()
 {
     // 获取房间初始化信息
-    auto r = cpr::Get(cpr::Url{ std::format("{}?id={}", api::live::bili::room_init.c_str(), roomID) });
+    auto r = cpr::Get(
+        cpr::Url{ std::format("{}?id={}", api::live::bili::room_init.c_str(), roomID) },
+        BiliHeaders(roomID));
     if (r.error || r.status_code != 200 || r.text.empty())
     {
         return { LiveStreamStatus::Error, "" };
@@ -47,7 +124,7 @@ LiveStreamInfo LiveBili::GetLiveStreamInfo()
         // 更新真实房间ID
         if (data.contains("room_id"))
         {
-            realRoomID = std::to_string(data["room_id"].get<int>());
+            realRoomID = std::to_string(data["room_id"].get<long long>());
         }
 
         std::string link = GetLinkByRealRoomID(realRoomID);
@@ -71,13 +148,13 @@ std::string LiveBili::GetLinkByRealRoomID(const std::string& realRoomID)
         build:6215200
         c_locale:zh_CN
 #endif
-        { "codec", "0" },
+        { "codec", "0,1" },
 #if 0
         device:web
         device_name:VTR-AL00
         dolby:1
 #endif
-        { "format", "0,2" },
+        { "format", "0,1,2" },
 #if 0
         free_type:0
         http:1
@@ -93,7 +170,9 @@ std::string LiveBili::GetLinkByRealRoomID(const std::string& realRoomID)
         {"platform", "h5" },
         play_type:0
 #endif
+        { "platform", "web" },
         { "protocol", "0,1" },
+        { "ptype", "8" },
         { "qn", "10000" },
         { "room_id", realRoomID },
 #if 0
@@ -106,7 +185,7 @@ std::string LiveBili::GetLinkByRealRoomID(const std::string& realRoomID)
 
 std::string LiveBili::GetStreamUrl(const cpr::Parameters param)
 {
-    auto r = cpr::Get(cpr::Url{ api::live::bili::v2_play_info }, param);
+    auto r = cpr::Get(cpr::Url{ api::live::bili::v2_play_info }, param, BiliHeaders(realRoomID));
     if (r.error || r.status_code != 200 || r.text.empty())
     {
         return "";
@@ -118,18 +197,52 @@ std::string LiveBili::GetStreamUrl(const cpr::Parameters param)
         {
             return "";
         }
+        if (!playInfo.contains("code") || playInfo["code"].get<int>() != 0)
+        {
+            return "";
+        }
         const auto& data = playInfo["data"];
         const auto& playurl_info = data["playurl_info"];
         const auto& playurl = playurl_info["playurl"];
-        const auto& stream = playurl["stream"][0];
-        const auto& format = stream["format"][0];
-        const auto& codec = format["codec"][0];
+        if (!playurl.contains("stream") || !playurl["stream"].is_array())
+        {
+            return "";
+        }
 
-        std::string base_url = codec["base_url"].get<std::string>();
-        std::string extra = codec["url_info"][0]["extra"].get<std::string>();
-        std::string host = codec["url_info"][0]["host"].get<std::string>();
-
-        return host + base_url + extra;
+        std::string fallbackUrl;
+        for (const auto& stream : playurl["stream"])
+        {
+            const bool preferredProtocol = stream.value("protocol_name", "") == "http_stream";
+            if (!stream.contains("format") || !stream["format"].is_array())
+            {
+                continue;
+            }
+            for (const auto& format : stream["format"])
+            {
+                const bool preferredFormat = format.value("format_name", "") == "flv";
+                if (!format.contains("codec") || !format["codec"].is_array())
+                {
+                    continue;
+                }
+                for (const auto& codec : format["codec"])
+                {
+                    const std::string streamUrl = BuildBiliStreamUrl(codec);
+                    if (streamUrl.empty())
+                    {
+                        continue;
+                    }
+                    if (fallbackUrl.empty())
+                    {
+                        fallbackUrl = streamUrl;
+                    }
+                    if (preferredProtocol && preferredFormat && codec.value("codec_name", "") == "avc")
+                    {
+                        return streamUrl;
+                    }
+                }
+            }
+        }
+        return fallbackUrl;
     }
     catch (const nlohmann::json::exception& e)
     {

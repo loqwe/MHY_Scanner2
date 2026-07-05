@@ -366,6 +366,8 @@ FodyWeavers.xsd
 *.flv
 *.dll
 log.txt
+.deps/
+install/
 /Config
 [Bb]uild
 /3rdparty/libcurl-vc17-X64-release-static-zlib-static-ipv6-sspi-schannel

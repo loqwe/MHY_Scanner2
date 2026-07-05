@@ -1,13 +1,19 @@
 ﻿#include "WindowMain.h"
 
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <filesystem>
+#include <tuple>
 
 #include <QMessageBox>
 #include <QWindow>
-#include <QRegularExpressionValidator>
 #include <QStringList>
 #include <QClipboard>
+#include <QColor>
+#include <QLineEdit>
+#include <QMetaObject>
+#include <QPointer>
 
 #include "MhyApi.hpp"
 #include "BSGameSDK.hpp"
@@ -67,20 +73,22 @@ WindowMain::WindowMain(QWidget* parent) :
 
     QThreadPool::globalInstance()->setMaxThreadCount(QThread::idealThreadCount());
     o.start();
-    ui.tableWidget->setColumnCount(5);
+    ui.tableWidget->setColumnCount(6);
     QStringList header;
     header << "序号"
            << "UID"
            << "用户名"
            << "类型"
+           << "状态"
            << "备注";
     ui.tableWidget->setHorizontalHeaderLabels(header);
     ui.tableWidget->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     ui.tableWidget->setColumnWidth(0, 35);
     ui.tableWidget->setColumnWidth(1, 100);
     ui.tableWidget->setColumnWidth(2, 100);
-    ui.tableWidget->setColumnWidth(3, 100);
-    ui.tableWidget->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
+    ui.tableWidget->setColumnWidth(3, 70);
+    ui.tableWidget->setColumnWidth(4, 70);
+    ui.tableWidget->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
     ui.tableWidget->verticalHeader()->setVisible(false);
     ui.tableWidget->horizontalHeader()->setFont(QFont("楷体", 11));
     ui.tableWidget->setAlternatingRowColors(true);
@@ -100,8 +108,15 @@ WindowMain::WindowMain(QWidget* parent) :
     ui.tableWidget->setSelectionMode(QAbstractItemView::SingleSelection);
     ui.tableWidget->setEditTriggers(QAbstractItemView::DoubleClicked);
 
-    ui.lineEditLiveId->setValidator(new QRegularExpressionValidator(QRegularExpression("[0-9]+$"), this));
-    ui.lineEditLiveId->setClearButtonEnabled(true);
+    ui.lineEditLiveId->setEditable(true);
+    if (ui.lineEditLiveId->lineEdit())
+    {
+        ui.lineEditLiveId->lineEdit()->setPlaceholderText("直播间ID或链接");
+        ui.lineEditLiveId->lineEdit()->setClearButtonEnabled(true);
+        connect(ui.lineEditLiveId->lineEdit(), &QLineEdit::editingFinished, this, [this]() {
+            saveLiveRoomId(ui.lineEditLiveId->currentText());
+        });
+    }
 
     ui.tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(ui.tableWidget, &QTableWidget::customContextMenuRequested, this, &WindowMain::onTableRightClicked);
@@ -134,9 +149,189 @@ void WindowMain::onTableRightClicked(const QPoint& pos)
     contextMenu.exec(ui.tableWidget->mapToGlobal(pos) + QPoint(0, 25));
 }
 
+void WindowMain::refreshLiveRoomIds()
+{
+    const QString currentText = ui.lineEditLiveId->currentText().trimmed();
+    QString savedText;
+
+    ui.lineEditLiveId->blockSignals(true);
+    ui.lineEditLiveId->clear();
+
+    if (userinfo.contains("live_room_ids") && userinfo["live_room_ids"].is_array())
+    {
+        for (const auto& item : userinfo["live_room_ids"])
+        {
+            if (!item.is_string())
+            {
+                continue;
+            }
+            const QString id = QString::fromStdString(item.get<std::string>()).trimmed();
+            if (!id.isEmpty() && ui.lineEditLiveId->findText(id) < 0)
+            {
+                ui.lineEditLiveId->addItem(id);
+            }
+        }
+    }
+
+    if (userinfo.contains("live_room_id") && userinfo["live_room_id"].is_string())
+    {
+        savedText = QString::fromStdString(userinfo["live_room_id"].get<std::string>()).trimmed();
+    }
+
+    if (!currentText.isEmpty())
+    {
+        ui.lineEditLiveId->setCurrentText(currentText);
+    }
+    else if (!savedText.isEmpty())
+    {
+        ui.lineEditLiveId->setCurrentText(savedText);
+    }
+
+    ui.lineEditLiveId->blockSignals(false);
+}
+
+void WindowMain::saveLiveRoomId(const QString& roomId)
+{
+    const QString text = roomId.trimmed();
+    if (text.isEmpty())
+    {
+        return;
+    }
+
+    try
+    {
+        if (!userinfo.is_object())
+        {
+            userinfo = nlohmann::json::parse(m_config->getConfig());
+        }
+
+        const std::string id = text.toStdString();
+        userinfo["live_room_id"] = id;
+        if (!userinfo.contains("live_room_ids") || !userinfo["live_room_ids"].is_array())
+        {
+            userinfo["live_room_ids"] = nlohmann::json::array();
+        }
+
+        auto& ids = userinfo["live_room_ids"];
+        for (auto it = ids.begin(); it != ids.end();)
+        {
+            if (it->is_string() && it->get<std::string>() == id)
+            {
+                it = ids.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        ids.insert(ids.begin(), id);
+        while (ids.size() > 5)
+        {
+            ids.erase(ids.end() - 1);
+        }
+
+        m_config->updateConfig(userinfo.dump());
+        refreshLiveRoomIds();
+    }
+    catch (const std::exception&)
+    {
+        QMessageBox::information(this, "错误", "保存直播间ID失败：配置文件异常", QMessageBox::Yes);
+    }
+}
+
+void WindowMain::setAccountCheckStatus(int row, bool valid, const QString& status)
+{
+    if (row < 0 || row >= ui.tableWidget->rowCount())
+    {
+        return;
+    }
+    QTableWidgetItem* statusItem = ui.tableWidget->item(row, 4);
+    if (!statusItem)
+    {
+        return;
+    }
+    statusItem->setText(status);
+    statusItem->setForeground(valid ? QColor(0, 130, 0) : QColor(220, 0, 0));
+}
+
+void WindowMain::startAccountSelfCheck()
+{
+    if (!userinfo.contains("account") || !userinfo["account"].is_array())
+    {
+        return;
+    }
+
+    std::vector<std::tuple<int, std::string, std::string, std::string, std::string>> accounts;
+    const int accountCount = std::min(userinfo.value("num", 0), static_cast<int>(userinfo["account"].size()));
+    accounts.reserve(accountCount);
+
+    for (int i = 0; i < accountCount; ++i)
+    {
+        QTableWidgetItem* statusItem = ui.tableWidget->item(i, 4);
+        if (statusItem)
+        {
+            statusItem->setText("检测中");
+            statusItem->setForeground(QColor(80, 80, 80));
+        }
+
+        const auto& account = userinfo["account"][i];
+        accounts.emplace_back(
+            i,
+            account.value("type", std::string{}),
+            account.value("access_key", std::string{}),
+            account.value("uid", std::string{}),
+            account.value("mid", std::string{}));
+    }
+
+    QPointer<WindowMain> self(this);
+    QThreadPool::globalInstance()->start([self, accounts = std::move(accounts)] {
+        for (const auto& [row, type, token, uid, mid] : accounts)
+        {
+            if (!self)
+            {
+                return;
+            }
+
+            const bool uidLooksValid = !uid.empty() &&
+                std::all_of(uid.begin(), uid.end(), [](unsigned char ch) {
+                    return std::isdigit(ch) != 0;
+                });
+
+            bool valid = false;
+            QString status = "失效";
+            if (!uidLooksValid)
+            {
+                status = "UID异常";
+            }
+            else if (type == "官服")
+            {
+                valid = !token.empty() && !mid.empty() && CheckStokenValid(token, mid);
+                status = valid ? "有效" : "失效";
+            }
+            else if (type == "崩坏3B服")
+            {
+                const auto result = BSGameSDK::BH3::GetUserInfo(uid, token);
+                valid = result.code == 0;
+                status = valid ? "有效" : "失效";
+            }
+            else
+            {
+                status = "未知类型";
+            }
+
+            QMetaObject::invokeMethod(self.data(), [self, row, valid, status]() {
+                if (self)
+                {
+                    self->setAccountCheckStatus(row, valid, status);
+                }
+            }, Qt::QueuedConnection);
+        }
+    });
+}
+
 void WindowMain::insertTableItems(QString uid, QString userName, QString type, QString notes)
 {
-    QTableWidgetItem* item[5]{};
+    QTableWidgetItem* item[6]{};
     int nCount = ui.tableWidget->rowCount();
     ui.tableWidget->insertRow(nCount);
     item[0] = new QTableWidgetItem(QString("%1").arg(nCount + 1));
@@ -147,10 +342,12 @@ void WindowMain::insertTableItems(QString uid, QString userName, QString type, Q
     ui.tableWidget->setItem(nCount, 2, item[2]);
     item[3] = new QTableWidgetItem(type);
     ui.tableWidget->setItem(nCount, 3, item[3]);
-    item[4] = new QTableWidgetItem(notes);
+    item[4] = new QTableWidgetItem("未检测");
     ui.tableWidget->setItem(nCount, 4, item[4]);
+    item[5] = new QTableWidgetItem(notes);
+    ui.tableWidget->setItem(nCount, 5, item[5]);
 
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 5; i++)
     {
         QTableWidgetItem* item1 = ui.tableWidget->item(nCount, i);
         item1->setFlags(item1->flags() & ~Qt::ItemIsEditable);
@@ -173,6 +370,9 @@ void WindowMain::AddAccount()
         }
         //TODO 有预期外信号触发,潜在bug
         insertTableItems(QString::fromStdString(uid), QString::fromStdString(name), QString::fromStdString(type), "");
+        countA = ui.tableWidget->rowCount() - 1;
+        ui.tableWidget->setCurrentCell(countA, 0);
+        ui.lineEditUname->setText(QString::fromStdString(name));
         QThreadPool::globalInstance()->start([this, token, uid, name, type, mid] {
             int num{ userinfo["num"] };
             userinfo["account"][num]["access_key"] = token;
@@ -212,14 +412,13 @@ void WindowMain::pBtstartScreen(bool clicked)
             std::string stoken = userinfo["account"][countA]["access_key"];
             std::string uid = userinfo["account"][countA]["uid"];
             std::string mid = userinfo["account"][countA]["mid"];
-            auto [code, game_token] = GetGameTokenByStoken(stoken, mid);
-            if (code != 0)
+            if (!CheckStokenValid(stoken, mid))
             {
                 emit AccountError();
                 return;
             }
             t1.setServerType(ServerType::Official);
-            t1.setLoginInfo(uid, game_token);
+            t1.setLoginInfo1(uid, stoken, mid);
         }
         else if (type == "崩坏3B服")
         {
@@ -246,8 +445,15 @@ void WindowMain::pBtStream(bool clicked)
     ui.pBtStream->setEnabled(false);
     ui.pBtStream->setText("加载中。。。");
     QApplication::processEvents();
+    const auto platform = static_cast<LivePlatform>(ui.comboBox->currentIndex());
+    const QString roomIdText = ui.lineEditLiveId->currentText().trimmed();
+    if (clicked && !roomIdText.isEmpty())
+    {
+        saveLiveRoomId(roomIdText);
+    }
+    const std::string roomId = roomIdText.toStdString();
 
-    QThreadPool::globalInstance()->start([&, clicked]() {
+    QThreadPool::globalInstance()->start([&, clicked, platform, roomId]() {
         if (!clicked)
         {
             emit StopScanner();
@@ -261,7 +467,7 @@ void WindowMain::pBtStream(bool clicked)
         std::string stream_link;
         std::map<std::string, std::string> heards;
         //检查直播间状态
-        if (!GetStreamLink(ui.lineEditLiveId->text().toStdString(), stream_link, heards))
+        if (!GetStreamLink(platform, roomId, stream_link, heards))
         {
             emit StopScanner();
             return;
@@ -275,14 +481,13 @@ void WindowMain::pBtStream(bool clicked)
             std::string stoken = userinfo["account"][countA]["access_key"];
             std::string uid = userinfo["account"][countA]["uid"];
             std::string mid = userinfo["account"][countA]["mid"];
-            auto [code, game_token] = GetGameTokenByStoken(stoken, mid);
-            if (code != 0)
+            if (!CheckStokenValid(stoken, mid))
             {
                 emit AccountError();
                 return;
             }
             t2.setServerType(ServerType::Official);
-            t2.setLoginInfo(uid, game_token);
+            t2.setLoginInfo1(uid, stoken, mid);
         }
         else if (type == "崩坏3B服")
         {
@@ -305,6 +510,7 @@ void WindowMain::pBtStream(bool clicked)
 
 void WindowMain::closeEvent(QCloseEvent* event)
 {
+    saveLiveRoomId(ui.lineEditLiveId->currentText());
     t1.stop();
     t2.stop();
 }
@@ -499,12 +705,21 @@ bool WindowMain::checkDuplicates(const std::string uid)
     return false;
 }
 
-bool WindowMain::GetStreamLink(const std::string& roomid, std::string& url, std::map<std::string, std::string>& heards)
+bool WindowMain::GetStreamLink(LivePlatform platform, const std::string& roomid, std::string& url, std::map<std::string, std::string>& heards)
 {
-    auto info = GetLiveInfo(static_cast<LivePlatform>(ui.comboBox->currentIndex()), roomid);
+    auto info = GetLiveInfo(platform, roomid);
     if (info.status == LiveStreamStatus::Normal)
     {
         url = info.link;
+        if (platform == LivePlatform::BiliBili)
+        {
+            heards["user_agent"] =
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "Chrome/126.0.0.0 Safari/537.36";
+            heards["headers"] =
+                "Referer: https://live.bilibili.com/\r\n"
+                "Origin: https://live.bilibili.com\r\n";
+        }
         return true;
     }
     else
@@ -633,6 +848,12 @@ void WindowMain::configInitUpdate()
                 QString::fromStdString(userinfo["account"][i]["type"]),
                 QString::fromStdString(userinfo["account"][i]["note"]));
         }
+        if (userinfo["num"].get<int>() > 0 && countA == -1)
+        {
+            countA = static_cast<int>(userinfo["last_account"]) > 0 ? static_cast<int>(userinfo["last_account"]) - 1 : 0;
+            ui.lineEditUname->setText(QString::fromStdString(userinfo["account"][countA]["name"]));
+            ui.tableWidget->setCurrentCell(countA, 0);
+        }
         if (userinfo["auto_start"] && static_cast<int>(userinfo["last_account"]) != 0)
         {
             countA = static_cast<int>(userinfo["last_account"]) - 1;
@@ -650,6 +871,8 @@ void WindowMain::configInitUpdate()
         {
             ui.checkBoxAutoLogin->setChecked(true);
         }
+        refreshLiveRoomIds();
+        startAccountSelfCheck();
     }
     catch (const std::exception& e)
     {
@@ -669,6 +892,10 @@ void WindowMain::configInitUpdate()
 
 void WindowMain::updateNote(QTableWidgetItem* item)
 {
+    if (!item || item->column() != 5)
+    {
+        return;
+    }
     QString text = item->text();
     userinfo["account"][item->row()]["note"] = text.toStdString();
     m_config->updateConfig(userinfo.dump());

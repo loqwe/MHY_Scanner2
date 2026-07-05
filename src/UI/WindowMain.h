@@ -86,11 +86,15 @@ private:
     void liveIdError(const LiveStreamStatus status);
     int getSelectedRowIndex();
     bool checkDuplicates(const std::string uid);
-    bool GetStreamLink(const std::string& roomid, std::string& url, std::map<std::string, std::string>& heards);
+    bool GetStreamLink(LivePlatform platform, const std::string& roomid, std::string& url, std::map<std::string, std::string>& heards);
     OnlineUpdate o;
     configInitLoad configinitload;
     void SetWindowToFront() const;
     WindowLogin* windowLogin{};
     void copyEntireRow(int row);
     void onTableRightClicked(const QPoint& pos);
+    void refreshLiveRoomIds();
+    void saveLiveRoomId(const QString& roomId);
+    void startAccountSelfCheck();
+    void setAccountCheckStatus(int row, bool valid, const QString& status);
 };

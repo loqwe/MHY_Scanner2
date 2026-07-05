@@ -94,6 +94,10 @@ namespace hkrpg
 constexpr auto base = api_sdk + compile_string{ "/hkrpg_cn" };
 constexpr auto qrcode_scan = base + compile_string{ "/combo/panda/qrcode/scan" };
 constexpr auto qrcode_confirm = base + compile_string{ "/combo/panda/qrcode/confirm" };
+
+constexpr compile_string sdk_base{ "https://hkrpg-sdk.mihoyo.com/hkrpg_cn" };
+constexpr auto qrcode_fetch = sdk_base + compile_string{ "/combo/panda/qrcode/fetch" };
+constexpr auto qrcode_query = sdk_base + compile_string{ "/combo/panda/qrcode/query" };
 }
 
 namespace nap
@@ -108,6 +112,7 @@ namespace takumi
 constexpr compile_string base{ "https://api-takumi.mihoyo.com" };
 constexpr auto multi_token = base + compile_string{ "/auth/api/getMultiTokenByLoginTicket" };
 constexpr auto game_token = base + compile_string{ "/auth/api/getGameToken" };
+constexpr auto cookie_account_info = base + compile_string{ "/auth/api/getCookieAccountInfoBySToken" };
 constexpr auto game_token_stoken = base + compile_string{ "/account/ma-cn-session/app/getTokenByGameToken" };
 }
 
@@ -115,6 +120,10 @@ namespace passport
 {
 constexpr compile_string base{ "https://passport-api.mihoyo.com" };
 constexpr auto create_captcha = base + compile_string{ "/account/ma-cn-verifier/verifier/createLoginCaptcha" };
+constexpr auto create_qr_login = base + compile_string{ "/account/ma-cn-passport/app/createQRLogin" };
+constexpr auto query_qr_login_status = base + compile_string{ "/account/ma-cn-passport/app/queryQRLoginStatus" };
+constexpr auto scan_qr_login = base + compile_string{ "/account/ma-cn-passport/app/scanQRLogin" };
+constexpr auto confirm_qr_login = base + compile_string{ "/account/ma-cn-passport/app/confirmQRLogin" };
 constexpr auto login_by_mobile_captcha = base + compile_string{ "/account/ma-cn-passport/app/loginByMobileCaptcha" };
 }
 

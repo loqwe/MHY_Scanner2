@@ -45,6 +45,13 @@ void QRCodeForStream::setLoginInfo(const std::string_view uid, const std::string
     this->m_name = name;
 }
 
+void QRCodeForStream::setLoginInfo1(const std::string_view uid, const std::string_view stoken, const std::string_view mid)
+{
+    this->uid = uid;
+    this->gameToken = stoken;
+    this->mid = mid;
+}
+
 void QRCodeForStream::setServerType(const ServerType servertype)
 {
     this->servertype = servertype;
@@ -85,17 +92,11 @@ void QRCodeForStream::LoginOfficial()
                 thread_local QRScanner qrScanners;
                 std::string str;
                 qrScanners.decodeSingle(img, str);
-                if (str.size() < 85)
+                std::string ticket;
+                if (!parseOfficialQRCode(str, ticket))
                 {
                     return;
                 }
-                std::string_view view(str.c_str() + 79, 3);
-                if (!setGameType.contains(view))
-                {
-                    return;
-                }
-                const std::string_view ticket(str.data() + str.size() - 24, 24);
-                setGameType[view]();
                 if (lastTicket == ticket)
                 {
                     return;
@@ -107,9 +108,11 @@ void QRCodeForStream::LoginOfficial()
                         mtx.unlock();
                         return;
                     }
-                    if (ScanQRLogin(scanUrl.data(), ticket, gameType))
+                    const std::string passportQrUrl = PandaScanQRCode(scanUrl, ticket, gameType);
+                    if (!passportQrUrl.empty())
                     {
                         lastTicket = ticket;
+                        lastQrCode = passportQrUrl;
                         nlohmann::json config = nlohmann::json::parse(m_config->getConfig());
                         if (config["auto_login"])
                         {
@@ -170,15 +173,11 @@ void QRCodeForStream::LoginBH3BiliBili()
                 thread_local QRScanner qrScanners;
                 std::string str;
                 qrScanners.decodeSingle(img, str);
-                if (str.size() < 85)
+                std::string ticket;
+                if (!parseOfficialQRCode(str, ticket) || gameType != GameType::Honkai3)
                 {
                     return;
                 }
-                if (std::string_view view(str.c_str() + 79, 3); view != "8F3")
-                {
-                    return;
-                }
-                const std::string& ticket = str.substr(str.length() - 24);
                 if (lastTicket == ticket)
                 {
                     return;
@@ -251,6 +250,7 @@ void QRCodeForStream::setUrl(const std::string& url, const std::map<std::string,
     av_dict_set(&pAvdictionary, "rtbufsize", "0", 0);
     av_dict_set(&pAvdictionary, "delay", "0", 0);
     av_dict_set(&pAvdictionary, "buffer_size", "1000", 0);
+    av_dict_set(&pAvdictionary, "rw_timeout", "5000000", 0);
 }
 
 auto QRCodeForStream::init() -> bool
@@ -310,7 +310,8 @@ void QRCodeForStream::continueLastLogin()
         using enum ServerType;
     case Official:
     {
-        bool b = ConfirmQRLogin(confirmUrl, uid, gameToken, lastTicket, gameType);
+        bool b = ScanPassportQRLogin(lastQrCode, gameToken, mid) &&
+                 ConfirmPassportQRLogin(lastQrCode, gameToken, mid);
         if (b)
         {
             Q_EMIT loginResults(ScanRet::SUCCESS);
@@ -357,7 +358,11 @@ void QRCodeForStream::run()
             break;
         }
     }
-    if (ret == ScanRet::LIVESTOP)
+    else
+    {
+        ret = ScanRet::STREAMERROR;
+    }
+    if (ret == ScanRet::LIVESTOP || ret == ScanRet::STREAMERROR)
     {
         emit loginResults(ret);
     }

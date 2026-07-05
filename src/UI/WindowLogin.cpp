@@ -12,6 +12,7 @@
 #include "BSGameSDK.hpp"
 #include "UtilMat.hpp"
 #include "CookieParser.hpp"
+#include "UrlQuery.hpp"
 
 WindowLogin::WindowLogin(QWidget* parent) :
     QWidget(parent),
@@ -523,8 +524,13 @@ void WindowLogin::StartQRCodeLogin()
         QRCodeQImage.fill(255);
         QRCodelabel->setText("二维码加载中");
         AllowDrawQRCode.store(false);
-        const std::string qrcodeString{ GetLoginQrcodeUrl() };
-        ticket = std::string{ qrcodeString.data() + qrcodeString.size() - 24, 24 };
+        auto [code, qrcodeString, qrcodeTicket] = GetLoginQrcodeUrl();
+        ticket = qrcodeTicket;
+        if (code != 0 || ticket.empty() || qrcodeString.empty())
+        {
+            emit QrcodeLoginResult(false);
+            return;
+        }
         QrcodeMat = createQrCodeToCvMat(qrcodeString);
         QRCodeQImage = CV_8UC1_MatToQImage(QrcodeMat);
         if (AllowDrawQRCode.load())
@@ -538,7 +544,7 @@ void WindowLogin::StartQRCodeLogin()
 
 void WindowLogin::CheckQRCodeLoginState()
 {
-    auto [state, uid, game_token] = GetQRCodeState(ticket);
+    auto [state, stoken, mid, uid] = GetQRCodeState(ticket);
     switch (state)
     {
     case LoginQRCodeState::Init:
@@ -552,18 +558,10 @@ void WindowLogin::CheckQRCodeLoginState()
     break;
     case LoginQRCodeState::Confirmed:
     {
-        auto [code, mid, stoken] = GetStokenByGameToken(uid, game_token);
-        if (code == 0)
-        {
-            std::string name{ getMysUserName(uid) };
-            emit AddUserInfo(name, stoken, uid, mid, "官服");
-            QRCodelabel->setText("登录成功！");
-            emit QrcodeLoginResult(true);
-        }
-        else
-        {
-            emit showMessagebox("获取STOKEN失败！");
-        }
+        std::string name{ getMysUserName(uid) };
+        emit AddUserInfo(name, stoken, uid, mid, "官服");
+        QRCodelabel->setText("登录成功！");
+        emit QrcodeLoginResult(true);
         return;
     }
     break;
