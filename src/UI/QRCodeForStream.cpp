@@ -2,9 +2,11 @@
 
 #include <string>
 #include <string_view>
+#include <algorithm>
 
 #include "QRScanner.h"
 #include "MhyApi.hpp"
+#include "StreamFrameConverter.hpp"
 
 QRCodeForStream::QRCodeForStream(QObject* parent) :
     QThread(parent),
@@ -24,12 +26,11 @@ QRCodeForStream::QRCodeForStream(QObject* parent) :
 
 QRCodeForStream::~QRCodeForStream()
 {
-    if (!this->isInterruptionRequested())
-    {
-        m_stop.store(false);
-    }
+    stop();
     this->requestInterruption();
     this->wait();
+    threadPool.waitForDone();
+    av_dict_free(&pAvdictionary);
 }
 
 void QRCodeForStream::setLoginInfo(const std::string_view uid, const std::string_view gameToken)
@@ -61,76 +62,60 @@ void QRCodeForStream::LoginOfficial()
 {
     while (m_stop.load())
     {
+        if (readDeadline.expired(av_gettime_relative()))
+        {
+            WriteScannerLog("stream: no decoded video frame within deadline");
+            ret = ScanRet::STREAMERROR;
+            break;
+        }
         if (av_read_frame(pAVFormatContext, pAVPacket) < 0)
         {
-            ret = ScanRet::LIVESTOP;
+            if (m_stop.load())
+            {
+                ret = readDeadline.expired(av_gettime_relative()) ? ScanRet::STREAMERROR : ScanRet::LIVESTOP;
+            }
             break;
         }
         if (pAVPacket->stream_index != videoStreamIndex)
         {
+            av_packet_unref(pAVPacket);
             continue;
         }
-        avcodec_send_packet(pAVCodecContext, pAVPacket);
+        const int sendResult = avcodec_send_packet(pAVCodecContext, pAVPacket);
+        if (sendResult < 0)
+        {
+            WriteScannerLog("stream: send packet error=" + std::to_string(sendResult));
+            av_packet_unref(pAVPacket);
+            ret = ScanRet::STREAMERROR;
+            break;
+        }
         if (pAVFrame == nullptr)
         {
             std::cerr << "Error allocating frame" << std::endl;
             ret = ScanRet::LIVESTOP;
             break;
         }
-        while (avcodec_receive_frame(pAVCodecContext, pAVFrame) == 0)
+        int receiveResult = AVERROR(EAGAIN);
+        while (m_stop.load() && (receiveResult = avcodec_receive_frame(pAVCodecContext, pAVFrame)) == 0)
         {
-            cv::Mat img(videoStreamHeight, videoStreamWidth, CV_8UC3);
-            uint8_t* dstData[1] = { img.data };
-            const int dstLinesize[1] = { static_cast<int>(img.step) };
-            sws_scale(pSwsContext, pAVFrame->data, pAVFrame->linesize, 0, pAVFrame->height,
-                      dstData, dstLinesize);
+            cv::Mat img;
+            if (!convertFrame(img))
+            {
+                ret = ScanRet::STREAMERROR;
+                stop();
+                break;
+            }
 #ifndef SHOW
             cv::imshow("Video_Stream", img);
             cv::waitKey(1);
 #endif
-            threadPool.tryStart([&, img = std::move(img)]() {
-                thread_local QRScanner qrScanners;
-                std::string str;
-                qrScanners.decodeSingle(img, str);
-                std::string ticket;
-                if (!parseOfficialQRCode(str, ticket))
-                {
-                    return;
-                }
-                if (lastTicket == ticket)
-                {
-                    return;
-                }
-                if (mtx.try_lock())
-                {
-                    if (!m_stop.load())
-                    {
-                        mtx.unlock();
-                        return;
-                    }
-                    const std::string passportQrUrl = PandaScanQRCode(scanUrl, ticket, gameType);
-                    if (!passportQrUrl.empty())
-                    {
-                        lastTicket = ticket;
-                        lastQrCode = passportQrUrl;
-                        nlohmann::json config = nlohmann::json::parse(m_config->getConfig());
-                        if (config["auto_login"])
-                        {
-                            continueLastLogin();
-                        }
-                        else
-                        {
-                            Q_EMIT loginConfirm(gameType, false);
-                        }
-                    }
-                    else
-                    {
-                        Q_EMIT loginResults(ScanRet::FAILURE_1);
-                    }
-                    stop();
-                    mtx.unlock();
-                }
-            });
+            submitFrame(std::move(img));
+        }
+        if (m_stop.load() && receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF)
+        {
+            WriteScannerLog("stream: receive frame error=" + std::to_string(receiveResult));
+            ret = ScanRet::STREAMERROR;
+            stop();
         }
         av_frame_unref(pAVFrame);
         av_packet_unref(pAVPacket);
@@ -141,16 +126,33 @@ void QRCodeForStream::LoginBH3BiliBili()
 {
     while (m_stop.load())
     {
+        if (readDeadline.expired(av_gettime_relative()))
+        {
+            WriteScannerLog("stream: no decoded video frame within deadline");
+            ret = ScanRet::STREAMERROR;
+            break;
+        }
         if (av_read_frame(pAVFormatContext, pAVPacket) < 0)
         {
-            ret = ScanRet::LIVESTOP;
+            if (m_stop.load())
+            {
+                ret = readDeadline.expired(av_gettime_relative()) ? ScanRet::STREAMERROR : ScanRet::LIVESTOP;
+            }
             break;
         }
         if (pAVPacket->stream_index != videoStreamIndex)
         {
+            av_packet_unref(pAVPacket);
             continue;
         }
-        avcodec_send_packet(pAVCodecContext, pAVPacket);
+        const int sendResult = avcodec_send_packet(pAVCodecContext, pAVPacket);
+        if (sendResult < 0)
+        {
+            WriteScannerLog("stream: send packet error=" + std::to_string(sendResult));
+            av_packet_unref(pAVPacket);
+            ret = ScanRet::STREAMERROR;
+            break;
+        }
         if (pAVFrame == nullptr)
         {
             std::cerr << "Error allocating frame" << std::endl;
@@ -158,112 +160,212 @@ void QRCodeForStream::LoginBH3BiliBili()
             break;
         }
 
-        while (avcodec_receive_frame(pAVCodecContext, pAVFrame) == 0)
+        int receiveResult = AVERROR(EAGAIN);
+        while (m_stop.load() && (receiveResult = avcodec_receive_frame(pAVCodecContext, pAVFrame)) == 0)
         {
-            cv::Mat img(videoStreamHeight, videoStreamWidth, CV_8UC3);
-            uint8_t* dstData[1] = { img.data };
-            const int dstLinesize[1] = { static_cast<int>(img.step) };
-            sws_scale(pSwsContext, pAVFrame->data, pAVFrame->linesize, 0, pAVFrame->height,
-                      dstData, dstLinesize);
+            cv::Mat img;
+            if (!convertFrame(img))
+            {
+                ret = ScanRet::STREAMERROR;
+                stop();
+                break;
+            }
 #ifndef SHOW
             cv::imshow("Video_Stream", img);
             cv::waitKey(1);
 #endif
-            threadPool.tryStart([&, img = std::move(img)]() {
-                thread_local QRScanner qrScanners;
-                std::string str;
-                qrScanners.decodeSingle(img, str);
-                std::string ticket;
-                if (!parseOfficialQRCode(str, ticket) || gameType != GameType::Honkai3)
-                {
-                    return;
-                }
-                if (lastTicket == ticket)
-                {
-                    return;
-                }
-                if (mtx.try_lock())
-                {
-                    if (!m_stop.load())
-                    {
-                        mtx.unlock();
-                        return;
-                    }
-                    if (ret = scanCheck(ticket); ret == ScanRet::SUCCESS)
-                    {
-                        lastTicket = ticket;
-                        nlohmann::json config = nlohmann::json::parse(m_config->getConfig());
-                        if (config["auto_login"])
-                        {
-                            continueLastLogin();
-                        }
-                        else
-                        {
-                            Q_EMIT loginConfirm(GameType::Honkai3_BiliBili, false);
-                        }
-                    }
-                    else
-                    {
-                        Q_EMIT loginResults(ret);
-                    }
-                    stop();
-                    mtx.unlock();
-                }
-            });
+            submitFrame(std::move(img));
+        }
+        if (m_stop.load() && receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF)
+        {
+            WriteScannerLog("stream: receive frame error=" + std::to_string(receiveResult));
+            ret = ScanRet::STREAMERROR;
+            stop();
         }
         av_frame_unref(pAVFrame);
         av_packet_unref(pAVPacket);
     }
 }
 
+int QRCodeForStream::interruptStream(void* opaque)
+{
+    const auto* scanner = static_cast<QRCodeForStream*>(opaque);
+    return scanner->m_cancelled.load() || !scanner->m_stop.load() ||
+           scanner->readDeadline.expired(av_gettime_relative());
+}
+
+void QRCodeForStream::submitFrame(cv::Mat img)
+{
+    pendingFrame = std::move(img);
+    const auto now = av_gettime_relative();
+    if (!m_stop.load() || !submitClock.due(now))
+    {
+        return;
+    }
+    // A shallow Mat copy retains the frame if all workers are busy; no queue grows.
+    if (threadPool.tryStart([this, img = pendingFrame]() { scanFrame(img); }))
+    {
+        submitClock.submitted(now);
+        pendingFrame.release();
+    }
+}
+
+void QRCodeForStream::scanFrame(const cv::Mat& img)
+{
+    try
+    {
+        if (!m_stop.load())
+        {
+            return;
+        }
+        thread_local QRScanner qrScanners;
+        std::string str;
+        qrScanners.decodeSingle(img, str);
+        std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
+        if (!lock.owns_lock() || !m_stop.load())
+        {
+            return;
+        }
+        std::string ticket;
+        if (!parseOfficialQRCode(str, ticket) || lastTicket == ticket ||
+            (servertype == ServerType::BH3_BiliBili && gameType != GameType::Honkai3))
+        {
+            return;
+        }
+        bool success = false;
+        if (servertype == ServerType::Official)
+        {
+            const std::string passportQrUrl = PandaScanQRCode(scanUrl, ticket, gameType);
+            success = !passportQrUrl.empty();
+            if (success)
+            {
+                lastQrCode = passportQrUrl;
+            }
+            else
+            {
+                Q_EMIT loginResults(ScanRet::FAILURE_1);
+            }
+        }
+        else
+        {
+            const ScanRet result = scanCheck(ticket);
+            success = result == ScanRet::SUCCESS;
+            if (!success)
+            {
+                Q_EMIT loginResults(result);
+            }
+        }
+        if (success)
+        {
+            lastTicket = ticket;
+            stop();
+            Q_EMIT loginConfirm(servertype == ServerType::Official ? gameType : GameType::Honkai3_BiliBili, false);
+        }
+        stop();
+    }
+    catch (const std::exception&)
+    {
+        WriteScannerLog("stream: QR worker exception");
+        stop();
+        Q_EMIT loginResults(ScanRet::STREAMERROR);
+    }
+}
+
 void QRCodeForStream::setStreamHW()
 {
-    if (pAVCodecContext->width < pAVCodecContext->height ||
-        pAVCodecContext->height == 480 ||
-        pAVCodecContext->height == 720)
+    if (pAVFrame->width < pAVFrame->height ||
+        pAVFrame->height == 480 ||
+        pAVFrame->height == 720)
     {
-        videoStreamWidth = pAVCodecContext->width;
-        videoStreamHeight = pAVCodecContext->height;
+        videoStreamWidth = pAVFrame->width;
+        videoStreamHeight = pAVFrame->height;
     }
     else
     {
-        videoStreamWidth = pAVCodecContext->width / 1.5;
-        videoStreamHeight = pAVCodecContext->height / 1.5;
+        videoStreamWidth = (std::max)(1, static_cast<int>(pAVFrame->width / 1.5));
+        videoStreamHeight = (std::max)(1, static_cast<int>(pAVFrame->height / 1.5));
     }
+}
+
+bool QRCodeForStream::convertFrame(cv::Mat& img)
+{
+    if (!pAVFrame || pAVFrame->width <= 0 || pAVFrame->height <= 0 ||
+        !av_pix_fmt_desc_get(static_cast<AVPixelFormat>(pAVFrame->format)) ||
+        !sws_isSupportedInput(static_cast<AVPixelFormat>(pAVFrame->format)) ||
+        av_image_check_size(pAVFrame->width, pAVFrame->height, 0, nullptr) < 0)
+    {
+        WriteScannerLog("stream: invalid decoded frame");
+        return false;
+    }
+    if (inputWidth != pAVFrame->width || inputHeight != pAVFrame->height || inputFormat != pAVFrame->format)
+    {
+        inputWidth = pAVFrame->width;
+        inputHeight = pAVFrame->height;
+        inputFormat = pAVFrame->format;
+        WriteScannerLog("stream: frame width=" + std::to_string(inputWidth) +
+                        " height=" + std::to_string(inputHeight) + " format=" + std::to_string(inputFormat));
+    }
+    setStreamHW();
+    img.create(videoStreamHeight, videoStreamWidth, CV_8UC3);
+    const int result = ConvertStreamFrame(pSwsContext, *pAVFrame, videoStreamWidth, videoStreamHeight,
+                                          img.data, static_cast<int>(img.step));
+    if (result != videoStreamHeight)
+    {
+        WriteScannerLog("stream: conversion failed result=" + std::to_string(result));
+        return false;
+    }
+    readDeadline.refresh(av_gettime_relative(), 10000000);
+    if (!readyEmitted)
+    {
+        readyEmitted = true;
+        Q_EMIT streamReady();
+    }
+    return true;
 }
 
 void QRCodeForStream::stop()
 {
+    m_cancelled.store(true);
     m_stop.store(false);
 }
 
 void QRCodeForStream::setUrl(const std::string& url, const std::map<std::string, std::string> heard)
 {
     streamUrl = url;
+    m_cancelled.store(false);
+    av_dict_free(&pAvdictionary);
     for (const auto& it : heard)
     {
         av_dict_set(&pAvdictionary, it.first.c_str(), it.second.c_str(), 0);
     }
-    av_dict_set(&pAvdictionary, "max_delay", "0", 0);
-    av_dict_set(&pAvdictionary, "probesize", "1024", 0);
-    av_dict_set(&pAvdictionary, "packetsize", "128", 0);
-    av_dict_set(&pAvdictionary, "rtbufsize", "0", 0);
-    av_dict_set(&pAvdictionary, "delay", "0", 0);
-    av_dict_set(&pAvdictionary, "buffer_size", "1000", 0);
+    av_dict_set(&pAvdictionary, "probesize", "5000000", 0);
+    av_dict_set(&pAvdictionary, "analyzeduration", "2000000", 0);
+    av_dict_set(&pAvdictionary, "buffer_size", "1024000", 0);
     av_dict_set(&pAvdictionary, "rw_timeout", "5000000", 0);
 }
 
 auto QRCodeForStream::init() -> bool
 {
     pAVFormatContext = avformat_alloc_context();
-    if (avformat_open_input(&pAVFormatContext, streamUrl.c_str(), NULL, &pAvdictionary) != 0)
+    if (!pAVFormatContext)
     {
-        std::cerr << "Error opening input file" << std::endl;
+        WriteScannerLog("stream: format context allocation failed");
         return false;
     }
-    if (avformat_find_stream_info(pAVFormatContext, NULL) < 0)
+    readDeadline.refresh(av_gettime_relative(), 10000000);
+    pAVFormatContext->interrupt_callback = { &QRCodeForStream::interruptStream, this };
+    int result = avformat_open_input(&pAVFormatContext, streamUrl.c_str(), NULL, &pAvdictionary);
+    if (result < 0)
+    {
+        std::cerr << "Error opening input file" << std::endl;
+        WriteScannerLog("stream: open input error=" + std::to_string(result));
+        return false;
+    }
+    result = avformat_find_stream_info(pAVFormatContext, NULL);
+    if (result < 0)
     {
         std::cerr << "Error finding stream information" << std::endl;
+        WriteScannerLog("stream: find stream info error=" + std::to_string(result));
         return false;
     }
     AVStream* videoStream = nullptr;
@@ -278,6 +380,7 @@ auto QRCodeForStream::init() -> bool
     if (videoStream == nullptr)
     {
         std::cerr << "No video stream found" << std::endl;
+        WriteScannerLog("stream: no video stream");
         return false;
     }
     videoStreamIndex = videoStream->index;
@@ -285,21 +388,37 @@ auto QRCodeForStream::init() -> bool
     if (decoder == nullptr)
     {
         std::cerr << "Codec not found" << std::endl;
+        WriteScannerLog("stream: decoder not found");
         return false;
     }
     pAVCodecContext = avcodec_alloc_context3(decoder);
-    avcodec_parameters_to_context(pAVCodecContext, videoStream->codecpar);
-    if (avcodec_open2(pAVCodecContext, decoder, NULL) < 0)
+    if (!pAVCodecContext)
     {
-        std::cerr << "Error opening codec" << std::endl;
+        WriteScannerLog("stream: codec context allocation failed");
         return false;
     }
-    setStreamHW();
-    pSwsContext = sws_getContext(
-        pAVCodecContext->width, pAVCodecContext->height, pAVCodecContext->pix_fmt,
-        videoStreamWidth, videoStreamHeight, AV_PIX_FMT_BGR24, SWS_BILINEAR, NULL, NULL, NULL);
+    result = avcodec_parameters_to_context(pAVCodecContext, videoStream->codecpar);
+    if (result < 0)
+    {
+        WriteScannerLog("stream: copy codec parameters error=" + std::to_string(result));
+        return false;
+    }
+    result = avcodec_open2(pAVCodecContext, decoder, NULL);
+    if (result < 0)
+    {
+        std::cerr << "Error opening codec" << std::endl;
+        WriteScannerLog("stream: open codec error=" + std::to_string(result));
+        return false;
+    }
     pAVPacket = av_packet_alloc();
     pAVFrame = av_frame_alloc();
+    if (!pAVPacket || !pAVFrame)
+    {
+        WriteScannerLog("stream: packet or frame allocation failed");
+        return false;
+    }
+    WriteScannerLog("stream: decoder initialized codec=" + std::to_string(videoStream->codecpar->codec_id));
+    readDeadline.refresh(av_gettime_relative(), 10000000);
     return true;
 }
 
@@ -324,8 +443,8 @@ void QRCodeForStream::continueLastLogin()
     break;
     case BH3_BiliBili:
     {
-        ret = scanConfirm(lastTicket, uid, gameToken, m_name);
-        Q_EMIT loginResults(ret);
+        const ScanRet result = scanConfirm(lastTicket, uid, gameToken, m_name);
+        Q_EMIT loginResults(result);
     }
     break;
     default:
@@ -336,38 +455,63 @@ void QRCodeForStream::continueLastLogin()
 void QRCodeForStream::run()
 {
     threadPool.setMaxThreadCount(threadNumber);
-    m_stop.store(true);
+    m_stop.store(!m_cancelled.load());
     ret = ScanRet::UNKNOW;
-    //TODO 获取直播流地址放在这里
-    if (init())
+    inputWidth = inputHeight = 0;
+    inputFormat = AV_PIX_FMT_NONE;
+    readyEmitted = false;
+    submitClock.reset();
+    pendingFrame.release();
+    try
     {
-#ifndef SHOW
-        cv::namedWindow("Video_Stream", cv::WINDOW_AUTOSIZE);
-        cv::resizeWindow("Video_Stream", videoStreamWidth / 2, videoStreamHeight / 2);
-#endif
-        switch (servertype)
+        if (m_stop.load())
         {
-            using enum ServerType;
-        case Official:
-            LoginOfficial();
-            break;
-        case BH3_BiliBili:
-            LoginBH3BiliBili();
-            break;
-        default:
-            break;
+            QRScanner modelCheck;
+        }
+        if (m_stop.load() && init())
+        {
+#ifndef SHOW
+            cv::namedWindow("Video_Stream", cv::WINDOW_AUTOSIZE);
+#endif
+            switch (servertype)
+            {
+                using enum ServerType;
+            case Official:
+                LoginOfficial();
+                break;
+            case BH3_BiliBili:
+                LoginBH3BiliBili();
+                break;
+            default:
+                break;
+            }
+        }
+        else if (!m_cancelled.load())
+        {
+            ret = ScanRet::STREAMERROR;
         }
     }
-    else
+    catch (const std::exception&)
     {
+        WriteScannerLog("stream: decoder exception");
         ret = ScanRet::STREAMERROR;
     }
+    stop();
+    threadPool.waitForDone();
+    pendingFrame.release();
     if (ret == ScanRet::LIVESTOP || ret == ScanRet::STREAMERROR)
     {
         emit loginResults(ret);
     }
 #ifndef SHOW
-    cv::destroyWindow("Video_Stream");
+    try
+    {
+        cv::destroyWindow("Video_Stream");
+    }
+    catch (const cv::Exception&)
+    {
+        WriteScannerLog("stream: preview cleanup failed");
+    }
 #endif
     avformat_close_input(&pAVFormatContext);
     avcodec_free_context(&pAVCodecContext);

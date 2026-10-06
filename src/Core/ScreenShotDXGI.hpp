@@ -1,348 +1,228 @@
-﻿#pragma once
+#pragma once
 
-#include <iostream>
-
+#include <climits>
+#include <cstddef>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <wrl/client.h>
+
+#include "ScreenFrameCopy.hpp"
 
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
 
 class ScreenShotDXGI
 {
 public:
-    ScreenShotDXGI() :
-        m_Device(nullptr),
-        m_DeskDupl(nullptr),
-        m_AcquiredDesktopImage(nullptr),
-        m_AcquiredDesktopImage_copy(nullptr),
-        m_monitorIdx(0)
-    {
-    }
-    ~ScreenShotDXGI()
-    {
-        if (m_AcquiredDesktopImage)
-        {
-            m_AcquiredDesktopImage->Release();
-            m_AcquiredDesktopImage = nullptr;
-        }
-        if (m_AcquiredDesktopImage_copy)
-        {
-            m_AcquiredDesktopImage_copy->Release();
-            m_AcquiredDesktopImage_copy = nullptr;
-        }
+    ScreenShotDXGI() = default;
+    ScreenShotDXGI(const ScreenShotDXGI&) = delete;
+    ScreenShotDXGI& operator=(const ScreenShotDXGI&) = delete;
+    ~ScreenShotDXGI() { doneWithFrame(); }
 
-        if (m_DeskDupl)
-        {
-            m_DeskDupl->Release();
-            m_DeskDupl = nullptr;
-        }
-
-        if (m_Device)
-        {
-            m_Device->Release();
-            m_Device = nullptr;
-        }
-    }
-    /*
-	 * @brief InitDevic
-	 * @param 2
-	 * @param 3
-	 * @return Initialization Result
-	 */
     bool InitDevice()
     {
-        ChooseAdapter();
-
-        HRESULT hr{ S_OK };
-        // Feature levels supported
-        D3D_FEATURE_LEVEL FeatureLevels[] = {
-            D3D_FEATURE_LEVEL_11_0,
-            D3D_FEATURE_LEVEL_10_1,
-            D3D_FEATURE_LEVEL_10_0,
-            D3D_FEATURE_LEVEL_9_1
-        };
-        UINT NumFeatureLevels = ARRAYSIZE(FeatureLevels);
-
-        D3D_FEATURE_LEVEL FeatureLevel;
-
-        // Create device
-
-        hr = D3D11CreateDevice(
-            selectedAdapter,
-            D3D_DRIVER_TYPE_UNKNOWN, // D3D_DRIVER_TYPE_UNKNOWN
-            nullptr,
-            /* D3D11_CREATE_DEVICE_BGRA_SUPPORT
-		* This flag adds support for surfaces with a different
-		* color channel ordering than the API default.
-		* You need it for compatibility with Direct2D. */
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            FeatureLevels,
-            NumFeatureLevels,
-            D3D11_SDK_VERSION,
-            &m_Device,
-            &FeatureLevel,
-            nullptr);
-        if (SUCCEEDED(hr))
+        doneWithFrame();
+        m_DeskDupl.Reset();
+        m_Staging.Reset();
+        m_Context.Reset();
+        m_Device.Reset();
+        m_Valid = false;
+        if (!ChooseAdapter())
         {
-            //trrlog::Log_debug("InitDevice success");
-            return true;
+            return false;
         }
-        //trrlog::Log_debug("InitDevice error");
-        return false;
+        const D3D_FEATURE_LEVEL levels[] = {
+            D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
+            D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_9_1
+        };
+        D3D_FEATURE_LEVEL level{};
+        m_LastError = D3D11CreateDevice(m_Adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN,
+            nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, ARRAYSIZE(levels),
+            D3D11_SDK_VERSION, m_Device.GetAddressOf(), &level, m_Context.GetAddressOf());
+        return SUCCEEDED(m_LastError) && m_Device && m_Context;
     }
 
-    bool InitDupl(UINT monitorIdx, int& duplWidth, int& duplHeight)
+    bool InitDupl(UINT monitorIdx, int& width, int& height)
     {
-        m_monitorIdx = monitorIdx;
-        HRESULT hr = S_FALSE;
-        // Get DXGI device
-        IDXGIDevice* DxgiDevice = nullptr;
-        hr = m_Device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&DxgiDevice));
-        if (FAILED(hr))
+        width = height = 0;
+        doneWithFrame();
+        m_DeskDupl.Reset();
+        m_Staging.Reset();
+        m_Valid = false;
+        if (!m_Device || !m_Adapter)
+        {
+            m_LastError = E_UNEXPECTED;
+            return false;
+        }
+        Microsoft::WRL::ComPtr<IDXGIOutput> output;
+        m_LastError = m_Adapter->EnumOutputs(monitorIdx, output.GetAddressOf());
+        if (FAILED(m_LastError))
         {
             return false;
         }
-
-        // Get DXGI adapter
-        IDXGIAdapter* DxgiAdapter = nullptr;
-        hr = DxgiDevice->GetParent(__uuidof(IDXGIAdapter), reinterpret_cast<void**>(&DxgiAdapter));
-        DxgiDevice->Release();
-        DxgiDevice = nullptr;
-        if (FAILED(hr))
+        Microsoft::WRL::ComPtr<IDXGIOutput1> output1;
+        m_LastError = output.As(&output1);
+        if (FAILED(m_LastError))
         {
             return false;
         }
-
-        // Get output
-        IDXGIOutput* DxgiOutput = nullptr;
-        hr = DxgiAdapter->EnumOutputs(m_monitorIdx, &DxgiOutput);
-        DxgiAdapter->Release();
-        DxgiAdapter = nullptr;
-        if (FAILED(hr))
+        m_LastError = output1->DuplicateOutput(m_Device.Get(), m_DeskDupl.GetAddressOf());
+        if (FAILED(m_LastError))
         {
             return false;
         }
-
-        // QI for Output 1
-        IDXGIOutput1* DxgiOutput1 = nullptr;
-        hr = DxgiOutput->QueryInterface(__uuidof(DxgiOutput1), reinterpret_cast<void**>(&DxgiOutput1));
-
-        DxgiOutput->Release();
-        DxgiOutput = nullptr;
-
-        if (FAILED(hr))
+        DXGI_OUTDUPL_DESC desc{};
+        m_DeskDupl->GetDesc(&desc);
+        if (!desc.ModeDesc.Width || !desc.ModeDesc.Height ||
+            desc.ModeDesc.Width > INT_MAX || desc.ModeDesc.Height > INT_MAX)
         {
+            m_LastError = E_INVALIDARG;
             return false;
         }
-
-        // Create desktop duplication
-        hr = DxgiOutput1->DuplicateOutput(m_Device, &m_DeskDupl);
-        DxgiOutput1->Release();
-        DxgiOutput1 = nullptr;
-
-        if (FAILED(hr))
-        {
-            if (hr == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE)
-            {
-                //WRITELOG("DXGI_ERROR_NOT_CURRENTLY_AVAILABLE");
-            }
-            //切换屏幕创建duplication失败时触发的错误
-            //char log[100];
-            //sprintf_s(log, "[0x%08X]: DxgiOutput1->DuplicateOutput failed.", hr);
-            //WRITELOG(log);
-            //LOGE("[0x%08X]: DxgiOutput1->DuplicateOutput failed.", hr);
-
-            return false;
-        }
-
-        DXGI_OUTDUPL_DESC outDuplDesc;
-        m_DeskDupl->GetDesc(&outDuplDesc);
-
-        duplWidth = outDuplDesc.ModeDesc.Width;
-        duplHeight = outDuplDesc.ModeDesc.Height;
-
-        m_DeskDupl_state = true;
-
-        //this->showMonitorInfos();
+        width = static_cast<int>(desc.ModeDesc.Width);
+        height = static_cast<int>(desc.ModeDesc.Height);
+        m_Valid = true;
         return true;
     }
 
-    /*
-	 * @brief Get
-	 * @param timeout
-	 * @return 0
-	 * @return 1
-	 * @return 2
-	 */
+    // 0: acquired; 1: duplication failure; 2: unchanged desktop/timeout.
     int getFrame(int timeout = 100)
     {
-        if (!m_DeskDupl_state)
+        if (!m_Valid || !m_DeskDupl || !doneWithFrame())
         {
-            //LOGE("Duplication Abnormal, unable to getFrame");
-            //return GETFRAME_DUPLICATION_ERROR;
             return 1;
         }
-        // If still holding old frame, destroy it
-        if (m_AcquiredDesktopImage)
-        {
-            m_AcquiredDesktopImage->Release();
-            m_AcquiredDesktopImage = nullptr;
-        }
-
-        IDXGIResource* DesktopResource = nullptr;
-        DXGI_OUTDUPL_FRAME_INFO FrameInfo;
-
-        // Get new frame
-        HRESULT hr = m_DeskDupl->AcquireNextFrame(timeout, &FrameInfo, &DesktopResource);
-
-        if (FAILED(hr))
-        {
-            if (hr == DXGI_ERROR_WAIT_TIMEOUT)
-            {
-                //屏幕无变化可能引起该错误
-                //LOGE("[0x%08X]: AcquireNextFrame failed.(May be caused by timeout)", hr);
-
-                if (DesktopResource)
-                {
-                    DesktopResource->Release();
-                    DesktopResource = nullptr;
-                }
-
-                //return GETFRAME_ERROR;
-                return 2;
-            }
-            else
-            {
-                //切换屏幕，锁屏可能引起该错误，一旦进入该错误，需要重启Duplication才能重新使用
-                //char log[100];
-                //sprintf_s(log, "[0x%08X]: AcquireNextFrame failed.(May be caused by screen switching)", hr);
-                //WRITELOG(log);
-
-                if (DesktopResource)
-                {
-                    DesktopResource->Release();
-                    DesktopResource = nullptr;
-                }
-                m_DeskDupl_state = false;
-                //return GETFRAME_DUPLICATION_ERROR;
-                return 1;
-            }
-        }
-
-        // QI for IDXGIResource
-        hr = DesktopResource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&m_AcquiredDesktopImage));
-
-        DesktopResource->Release();
-        DesktopResource = nullptr;
-
-        if (FAILED(hr))
+        Microsoft::WRL::ComPtr<IDXGIResource> resource;
+        DXGI_OUTDUPL_FRAME_INFO info{};
+        m_LastError = m_DeskDupl->AcquireNextFrame(static_cast<UINT>(timeout < 0 ? 0 : timeout),
+            &info, resource.GetAddressOf());
+        if (m_LastError == DXGI_ERROR_WAIT_TIMEOUT)
         {
             return 2;
         }
-        //return GETFRAME_SUCCESS;
+        if (FAILED(m_LastError))
+        {
+            m_Valid = false;
+            return 1;
+        }
+        m_FrameHeld = true;
+        m_LastError = resource.As(&m_Frame);
+        if (FAILED(m_LastError))
+        {
+            doneWithFrame();
+            return 1;
+        }
         return 0;
     }
 
-    bool copyFrameToBuffer(BYTE** buffer, long bufferSize)
+    bool copyFrameToBuffer(BYTE* buffer, std::size_t bufferSize)
     {
-        HRESULT hr;
-        ID3D11DeviceContext* context;
-        m_Device->GetImmediateContext(&context);
-
-        if (!m_AcquiredDesktopImage_copy)
+        if (!m_Frame || !m_FrameHeld || !m_Context || !buffer)
         {
-            D3D11_TEXTURE2D_DESC desc;
-            m_AcquiredDesktopImage->GetDesc(&desc);
-            // Create CPU access texture m_AcquiredDesktopImage_copy
-            D3D11_TEXTURE2D_DESC copyImageDesc{};
-            copyImageDesc.Width = desc.Width;
-            copyImageDesc.Height = desc.Height;
-            copyImageDesc.Format = desc.Format;
-            copyImageDesc.ArraySize = 1;
-            copyImageDesc.BindFlags = 0;
-            copyImageDesc.MiscFlags = 0;
-            copyImageDesc.SampleDesc.Count = 1;
-            copyImageDesc.SampleDesc.Quality = 0;
-            copyImageDesc.MipLevels = 1;
-            copyImageDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
-            copyImageDesc.Usage = D3D11_USAGE_STAGING;
-            hr = m_Device->CreateTexture2D(&copyImageDesc, NULL, &m_AcquiredDesktopImage_copy);
-
-            if (FAILED(hr))
-            {
-                //LOGE("[0x%08X]: CreateTexture2D failed.", hr);
-                return false;
-            }
-        }
-
-        context->CopyResource(m_AcquiredDesktopImage_copy, m_AcquiredDesktopImage); //源Texture2D和目的Texture2D需要有相同的多重采样计数和质量时
-
-        D3D11_MAPPED_SUBRESOURCE mapRes;
-        UINT subresource = D3D11CalcSubresource(0, 0, 0);
-
-        hr = context->Map(m_AcquiredDesktopImage_copy, subresource, D3D11_MAP_READ, 0, &mapRes);
-        if (FAILED(hr))
-        {
-            //LOGE("[0x%08X]: context->Map failed.", hr);
+            m_LastError = E_INVALIDARG;
             return false;
         }
-        BYTE* dptr = *buffer;
-        memcpy_s(dptr, bufferSize, mapRes.pData, bufferSize);
-        context->Unmap(m_AcquiredDesktopImage_copy, subresource);
-        return true;
+        D3D11_TEXTURE2D_DESC desc{};
+        m_Frame->GetDesc(&desc);
+        if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM || desc.SampleDesc.Count != 1)
+        {
+            m_LastError = E_INVALIDARG;
+            return false;
+        }
+        if (!m_Staging || m_Width != desc.Width || m_Height != desc.Height)
+        {
+            m_Staging.Reset();
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = desc.MiscFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            m_LastError = m_Device->CreateTexture2D(&desc, nullptr, m_Staging.GetAddressOf());
+            if (FAILED(m_LastError))
+            {
+                return false;
+            }
+            m_Width = desc.Width;
+            m_Height = desc.Height;
+        }
+        m_Context->CopyResource(m_Staging.Get(), m_Frame.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        m_LastError = m_Context->Map(m_Staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+        if (FAILED(m_LastError))
+        {
+            return false;
+        }
+        const bool copied = CopyScreenBGRA(buffer, bufferSize, mapped.pData,
+            mapped.RowPitch, m_Width, m_Height);
+        m_Context->Unmap(m_Staging.Get(), 0);
+        if (!copied)
+        {
+            m_LastError = E_INVALIDARG;
+        }
+        return copied;
     }
 
     bool doneWithFrame()
     {
-        HRESULT hr = m_DeskDupl->ReleaseFrame();
-        if (FAILED(hr))
+        m_Frame.Reset();
+        if (!m_FrameHeld)
         {
+            return true;
+        }
+        m_FrameHeld = false;
+        m_LastError = m_DeskDupl->ReleaseFrame();
+        if (FAILED(m_LastError))
+        {
+            m_Valid = false;
             return false;
         }
-
-        if (m_AcquiredDesktopImage)
-        {
-            m_AcquiredDesktopImage->Release();
-            m_AcquiredDesktopImage = nullptr;
-        }
-
         return true;
     }
 
-private:
-    void ChooseAdapter()
-    {
-        IDXGIFactory1* dxgiFactory{ nullptr };
-        HRESULT hr{ CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&dxgiFactory) };
+    HRESULT lastError() const { return m_LastError; }
 
-        if (FAILED(hr))
+private:
+    bool ChooseAdapter()
+    {
+        m_Adapter.Reset();
+        Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+        m_LastError = CreateDXGIFactory1(__uuidof(IDXGIFactory1),
+            reinterpret_cast<void**>(factory.GetAddressOf()));
+        if (FAILED(m_LastError))
         {
-            return;
+            return false;
         }
-        for (UINT i = 0; dxgiFactory->EnumAdapters1(i, &selectedAdapter) != DXGI_ERROR_NOT_FOUND; ++i)
+        for (UINT i = 0;; ++i)
         {
-            DXGI_ADAPTER_DESC1 desc;
-            hr = selectedAdapter->GetDesc1(&desc);
-            char narrowString[100];
-            WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, narrowString, sizeof(narrowString), NULL, NULL);
-            //trrlog::Log_debug("{}", narrowString);
-            if (desc.Flags != DXGI_ADAPTER_FLAG_SOFTWARE)
+            Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+            m_LastError = factory->EnumAdapters1(i, adapter.GetAddressOf());
+            if (FAILED(m_LastError))
             {
-                //trrlog::Log_debug("used display adapter{}", narrowString);
-                break;
+                return false;
+            }
+            DXGI_ADAPTER_DESC1 desc{};
+            if (FAILED(adapter->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
+            {
+                continue;
+            }
+            Microsoft::WRL::ComPtr<IDXGIOutput> output;
+            DXGI_OUTPUT_DESC outputDesc{};
+            if (SUCCEEDED(adapter->EnumOutputs(0, output.GetAddressOf())) &&
+                SUCCEEDED(output->GetDesc(&outputDesc)) && outputDesc.AttachedToDesktop)
+            {
+                m_Adapter = adapter;
+                return true;
             }
         }
-        dxgiFactory->Release();
     }
 
-private:
-    ID3D11Device* m_Device;
-    IDXGIOutputDuplication* m_DeskDupl;
-    bool m_DeskDupl_state = false;
-
-    UINT m_monitorIdx;
-    ID3D11Texture2D* m_AcquiredDesktopImage;
-    ID3D11Texture2D* m_AcquiredDesktopImage_copy;
-
-    IDXGIAdapter1* selectedAdapter;
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> m_Adapter;
+    Microsoft::WRL::ComPtr<ID3D11Device> m_Device;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
+    Microsoft::WRL::ComPtr<IDXGIOutputDuplication> m_DeskDupl;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_Frame;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_Staging;
+    UINT m_Width = 0;
+    UINT m_Height = 0;
+    HRESULT m_LastError = S_OK;
+    bool m_FrameHeld = false;
+    bool m_Valid = false;
 };

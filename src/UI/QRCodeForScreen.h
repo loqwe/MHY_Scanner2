@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include <atomic>
 #include <functional>
 
 #include <QMutex>
@@ -36,6 +37,7 @@ private:
     ConfigDate* m_config;
     void LoginOfficial();
     void LoginBH3BiliBili();
+    void monitorScreen(bool official);
     std::atomic<bool> m_stop;
     std::string m_name;
     GameType m_gametype{ GameType::UNKNOW };
