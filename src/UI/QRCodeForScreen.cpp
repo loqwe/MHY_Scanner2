@@ -1,33 +1,41 @@
-﻿#include "QRCodeForScreen.h"
+#include "QRCodeForScreen.h"
 
 #include <chrono>
+#include <limits>
 #include <thread>
+#include <vector>
 
-#include <QFuture>
-#include <QtConcurrent/QtConcurrent>
 #include <QThreadPool>
 
 #include "QRScanner.h"
-#include "ScreenScan.h"
 #include "ScreenShotDXGI.hpp"
 
-#define DELAYED 200
+namespace
+{
+constexpr auto CaptureDelay = std::chrono::milliseconds(200);
 
-QRCodeForScreen::QRCodeForScreen(QObject* parent) :
-    QThread(parent),
-    m_stop(false)
+struct WaitForScreenWorkers
+{
+    QThreadPool& pool;
+    std::atomic<bool>& running;
+    ~WaitForScreenWorkers()
+    {
+        running.store(false);
+        pool.waitForDone();
+    }
+};
+}
+
+QRCodeForScreen::QRCodeForScreen(QObject* parent) : QThread(parent), m_stop(false)
 {
     m_config = &ConfigDate::getInstance();
 }
 
 QRCodeForScreen::~QRCodeForScreen()
 {
-    if (!this->isInterruptionRequested())
-    {
-        m_stop.store(false);
-    }
-    this->requestInterruption();
-    this->wait();
+    stop();
+    requestInterruption();
+    wait();
 }
 
 void QRCodeForScreen::setLoginInfo(const std::string& uid, const std::string& token)
@@ -38,183 +46,172 @@ void QRCodeForScreen::setLoginInfo(const std::string& uid, const std::string& to
 
 void QRCodeForScreen::setLoginInfo(const std::string& uid, const std::string& token, const std::string& name)
 {
-    this->uid = uid;
-    this->gameToken = token;
-    this->m_name = name;
+    setLoginInfo(uid, token);
+    m_name = name;
 }
 
 void QRCodeForScreen::setLoginInfo1(const std::string& uid, const std::string& stoken, const std::string& mid)
 {
-    this->uid = uid;
-    this->gameToken = stoken;
+    setLoginInfo(uid, stoken);
     this->mid = mid;
 }
 
 void QRCodeForScreen::LoginOfficial()
 {
-    QThreadPool threadPool;
-    threadPool.setMaxThreadCount(threadNumber);
-    std::mutex mtx;
-    ScreenShotDXGI screenshotdxgi;
-    int w{ 0 };
-    int h{ 0 };
-    screenshotdxgi.InitDevice();
-    screenshotdxgi.InitDupl(0, w, h);
-    long mBufferSize = w * h * 4;
-    uint8_t* mBuffer = new UCHAR[mBufferSize];
-    while (m_stop.load())
-    {
-        screenshotdxgi.getFrame(100);
-        screenshotdxgi.copyFrameToBuffer(&mBuffer, mBufferSize);
-        cv::Mat img;
-        cv::resize(cv::Mat(h, w, CV_8UC4, mBuffer), img, { 1280, 720 });
-#ifndef SHOW
-        cv::imshow("Video_Stream", img);
-        cv::waitKey(1);
-#endif
-        threadPool.tryStart([&, img = std::move(img)]() {
-            thread_local QRScanner qrScanners;
-            std::string str;
-            qrScanners.decodeSingle(img, str);
-            std::string ticket;
-            if (!parseOfficialQRCode(str, ticket))
-            {
-                return;
-            }
-            if (lastTicket == ticket)
-            {
-                return;
-            }
-            if (mtx.try_lock())
-            {
-                if (!m_stop.load())
-                {
-                    mtx.unlock();
-                    return;
-                }
-                const std::string passportQrUrl = PandaScanQRCode(scanUrl, ticket, gameType);
-                if (!passportQrUrl.empty())
-                {
-                    lastTicket = ticket;
-                    lastQrCode = passportQrUrl;
-                    nlohmann::json config = nlohmann::json::parse(m_config->getConfig());
-                    if (config["auto_login"])
-                    {
-                        continueLastLogin();
-                    }
-                    else
-                    {
-                        emit loginConfirm(gameType, true);
-                    }
-                }
-                else
-                {
-                    emit loginResults(ScanRet::FAILURE_1);
-                }
-                stop();
-                mtx.unlock();
-            }
-        });
-        std::this_thread::sleep_for(std::chrono::milliseconds(DELAYED));
-        screenshotdxgi.doneWithFrame();
-    }
-    delete[] mBuffer;
+    monitorScreen(true);
 }
 
 void QRCodeForScreen::LoginBH3BiliBili()
 {
-    QThreadPool threadPool;
-    threadPool.setMaxThreadCount(threadNumber);
-    std::mutex mtx;
-    ScreenShotDXGI screenshotdxgi;
-    int w{ 0 };
-    int h{ 0 };
-    screenshotdxgi.InitDevice();
-    screenshotdxgi.InitDupl(0, w, h);
-    long mBufferSize = w * h * 4;
-    uint8_t* mBuffer = new UCHAR[mBufferSize];
-    while (m_stop.load())
+    monitorScreen(false);
+}
+
+void QRCodeForScreen::monitorScreen(bool official)
+{
+    // One worker owns decoder and login state; it is drained before either is destroyed.
+    QRScanner scanner;
+    ScreenShotDXGI capture;
+    int width = 0;
+    int height = 0;
+    if (!capture.InitDevice() || !capture.InitDupl(0, width, height))
     {
-        screenshotdxgi.getFrame(100);
-        screenshotdxgi.copyFrameToBuffer(&mBuffer, mBufferSize);
-        cv::Mat img;
-        cv::resize(cv::Mat(h, w, CV_8UC4, mBuffer), img, { 1280, 720 });
+        WriteScannerLog("screen: initialization failed hr=" + std::to_string(capture.lastError()));
+        stop();
+        Q_EMIT loginResults(ScanRet::STREAMERROR);
+        return;
+    }
+    const auto maximum = (std::numeric_limits<std::size_t>::max)();
+    if (width <= 0 || height <= 0 || static_cast<std::size_t>(width) > maximum / 4 ||
+        static_cast<std::size_t>(height) > maximum / (static_cast<std::size_t>(width) * 4))
+    {
+        throw std::runtime_error("Invalid desktop frame size");
+    }
+    std::vector<unsigned char> buffer(static_cast<std::size_t>(width) * height * 4);
+    cv::Mat lastGoodFrame;
+    QThreadPool pool;
+    pool.setMaxThreadCount(threadNumber);
+    WaitForScreenWorkers waitForWorkers{pool, m_stop};
+    bool captureFailed = false;
+    while (m_stop.load() && !isInterruptionRequested())
+    {
+        const int result = capture.getFrame(100);
+        if (result == 1)
+        {
+            WriteScannerLog("screen: acquisition failed hr=" + std::to_string(capture.lastError()));
+            captureFailed = true;
+            break;
+        }
+        cv::Mat image;
+        if (result == 0)
+        {
+            if (!capture.copyFrameToBuffer(buffer.data(), buffer.size()))
+            {
+                WriteScannerLog("screen: frame copy failed hr=" + std::to_string(capture.lastError()));
+                capture.doneWithFrame();
+                captureFailed = true;
+                break;
+            }
+            // Release the DXGI frame before resize/decode, including exception paths.
+            if (!capture.doneWithFrame())
+            {
+                WriteScannerLog("screen: frame release failed hr=" + std::to_string(capture.lastError()));
+                captureFailed = true;
+                break;
+            }
+            cv::resize(cv::Mat(height, width, CV_8UC4, buffer.data()), image, {1280, 720});
+            lastGoodFrame = image;
+        }
+        else if (!lastGoodFrame.empty())
+        {
+            image = lastGoodFrame;
+        }
+        if (!image.empty())
+        {
 #ifndef SHOW
-        cv::imshow("Video_Stream", img);
-        cv::waitKey(1);
+            cv::imshow("Video_Stream", image);
+            cv::waitKey(1);
 #endif
-        threadPool.tryStart([&, img = std::move(img)]() {
-            thread_local QRScanner qrScanners;
-            std::string str;
-            qrScanners.decodeSingle(img, str);
-            std::string ticket;
-            if (!parseOfficialQRCode(str, ticket) || gameType != GameType::Honkai3)
-            {
-                return;
-            }
-            if (lastTicket == ticket)
-            {
-                return;
-            }
-            if (mtx.try_lock())
-            {
-                if (!m_stop.load())
+            pool.tryStart([this, &scanner, official, image = std::move(image)]() {
+                try
                 {
-                    mtx.unlock();
-                    return;
-                }
-                if (ret = scanCheck(ticket); ret == ScanRet::SUCCESS)
-                {
-                    lastTicket = ticket;
-                    nlohmann::json config = nlohmann::json::parse(m_config->getConfig());
-                    if (config["auto_login"])
+                    if (!m_stop.load() || isInterruptionRequested())
                     {
-                        continueLastLogin();
+                        return;
+                    }
+                    std::string decoded;
+                    scanner.decodeSingle(image, decoded);
+                    std::string ticket;
+                    if (!m_stop.load() || isInterruptionRequested() ||
+                        !parseOfficialQRCode(decoded, ticket) || (!official && gameType != GameType::Honkai3) ||
+                        lastTicket == ticket)
+                    {
+                        return;
+                    }
+                    bool accepted = false;
+                    if (official)
+                    {
+                        const std::string passportQrUrl = PandaScanQRCode(scanUrl, ticket, gameType);
+                        accepted = !passportQrUrl.empty();
+                        if (accepted)
+                        {
+                            lastQrCode = passportQrUrl;
+                        }
                     }
                     else
                     {
-                        emit loginConfirm(GameType::Honkai3_BiliBili, true);
+                        ret = scanCheck(ticket);
+                        accepted = ret == ScanRet::SUCCESS;
+                    }
+                    if (!m_stop.load() || isInterruptionRequested())
+                    {
+                        return;
+                    }
+                    if (accepted)
+                    {
+                        lastTicket = ticket;
+                        // Stop capture before publishing a confirmation to the UI.
+                        stop();
+                        Q_EMIT loginConfirm(official ? gameType : GameType::Honkai3_BiliBili, true);
+                    }
+                    else
+                    {
+                        stop();
+                        Q_EMIT loginResults(ScanRet::FAILURE_1);
                     }
                 }
-                else
+                catch (...)
                 {
-                    emit loginResults(ScanRet::FAILURE_1);
+                    WriteScannerLog("screen: QR worker failed");
+                    stop();
+                    Q_EMIT loginResults(ScanRet::STREAMERROR);
                 }
-                stop();
-                mtx.unlock();
-            }
-        });
-        std::this_thread::sleep_for(std::chrono::milliseconds(DELAYED));
-        screenshotdxgi.doneWithFrame();
+            });
+        }
+        std::this_thread::sleep_for(CaptureDelay);
     }
-    delete[] mBuffer;
+    const bool reportCaptureFailure = captureFailed && m_stop.exchange(false);
+    pool.waitForDone();
+    if (reportCaptureFailure)
+    {
+        Q_EMIT loginResults(ScanRet::STREAMERROR);
+    }
 }
 
 void QRCodeForScreen::continueLastLogin()
 {
     switch (servertype)
     {
-        using enum ServerType;
-    case Official:
+    case ServerType::Official:
     {
-        bool b = ScanPassportQRLogin(lastQrCode, gameToken, mid) &&
-                 ConfirmPassportQRLogin(lastQrCode, gameToken, mid);
-        if (b)
-        {
-            Q_EMIT loginResults(ScanRet::SUCCESS);
-        }
-        else
-        {
-            Q_EMIT loginResults(ScanRet::FAILURE_2);
-        }
+        const bool loggedIn = ScanPassportQRLogin(lastQrCode, gameToken, mid) &&
+                              ConfirmPassportQRLogin(lastQrCode, gameToken, mid);
+        Q_EMIT loginResults(loggedIn ? ScanRet::SUCCESS : ScanRet::FAILURE_2);
+        break;
     }
-    break;
-    case BH3_BiliBili:
-    {
+    case ServerType::BH3_BiliBili:
         ret = scanConfirm(lastTicket, uid, gameToken, m_name);
         Q_EMIT loginResults(ret);
-    }
-    break;
+        break;
     default:
         break;
     }
@@ -224,27 +221,44 @@ void QRCodeForScreen::run()
 {
     ret = ScanRet::UNKNOW;
     m_stop.store(true);
-#ifndef SHOW
-    cv::namedWindow("Video_Stream", cv::WINDOW_AUTOSIZE);
-#endif
-    switch (servertype)
+    try
     {
-    case ServerType::Official:
-        LoginOfficial();
-        break;
-    case ServerType::BH3_BiliBili:
-        LoginBH3BiliBili();
-        break;
-    default:
-        break;
-    }
 #ifndef SHOW
-    cv::destroyWindow("Video_Stream");
+        cv::namedWindow("Video_Stream", cv::WINDOW_AUTOSIZE);
+#endif
+        switch (servertype)
+        {
+        case ServerType::Official:
+            LoginOfficial();
+            break;
+        case ServerType::BH3_BiliBili:
+            LoginBH3BiliBili();
+            break;
+        default:
+            break;
+        }
+    }
+    catch (...)
+    {
+        WriteScannerLog("screen: model or capture initialization failed");
+        Q_EMIT loginResults(ScanRet::STREAMERROR);
+    }
+    m_stop.store(false);
+#ifndef SHOW
+    try
+    {
+        cv::destroyWindow("Video_Stream");
+    }
+    catch (...)
+    {
+        WriteScannerLog("screen: preview cleanup failed");
+    }
 #endif
 }
 
 void QRCodeForScreen::stop()
 {
+    requestInterruption();
     m_stop.store(false);
 }
 

@@ -13,6 +13,7 @@
 #include "ui_WindowMain.h"
 #include "WindowLogin.h"
 #include "WindowAbout.h"
+#include "ConfirmationDelay.hpp"
 
 class OnlineUpdate :
     public QThread
@@ -76,6 +77,9 @@ Q_SIGNALS:
     void StartScanLive();
 
 private:
+    void scheduleConfirmation(bool screen);
+    ConfirmationDelay confirmationDelay{this};
+    QFuture<void> confirmationJob;
     void failure();
     int countA = -1;
     Ui::WindowMain ui;

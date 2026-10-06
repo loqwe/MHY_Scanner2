@@ -1,0 +1,33 @@
+cmake_minimum_required(VERSION 3.26)
+project(confirmation_delay_regression LANGUAGES CXX)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
+add_executable(test_confirmation_delay test_confirmation_delay.cpp)
+target_compile_features(test_confirmation_delay PRIVATE cxx_std_17)
+target_include_directories(test_confirmation_delay PRIVATE ../../src/UI)
+target_link_libraries(test_confirmation_delay PRIVATE Qt6::Core)
+if(MSVC)
+    target_compile_options(test_confirmation_delay PRIVATE /W4 /WX /EHsc /utf-8)
+endif()
+add_custom_command(TARGET test_confirmation_delay POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:Qt6::Core>" "$<TARGET_FILE_DIR:test_confirmation_delay>")
+enable_testing()
+add_test(NAME confirmation_delay_regression COMMAND test_confirmation_delay)
+
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTOUIC_SEARCH_PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../../src/UI")
+add_executable(test_confirmation_ui test_confirmation_ui.cpp)
+target_compile_features(test_confirmation_ui PRIVATE cxx_std_17)
+target_link_libraries(test_confirmation_ui PRIVATE Qt6::Widgets)
+if(MSVC)
+    target_compile_options(test_confirmation_ui PRIVATE /W4 /WX /EHsc /utf-8)
+endif()
+add_custom_command(TARGET test_confirmation_ui POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:Qt6::Widgets>" "$<TARGET_FILE:Qt6::Gui>"
+            "$<TARGET_FILE:Qt6::Core>" "$<TARGET_FILE_DIR:test_confirmation_ui>")
+add_test(NAME confirmation_ui_regression COMMAND test_confirmation_ui -platform windows)
+set_tests_properties(confirmation_ui_regression PROPERTIES ENVIRONMENT "QT_PLUGIN_PATH=${Qt6_DIR}/../../../plugins;QT_SCREEN_SCALE_FACTORS=1.25")
+foreach(scale IN ITEMS 1.5 2)
+    add_test(NAME confirmation_ui_scale_${scale} COMMAND test_confirmation_ui -platform windows)
+    set_tests_properties(confirmation_ui_scale_${scale} PROPERTIES
+        ENVIRONMENT "QT_PLUGIN_PATH=${Qt6_DIR}/../../../plugins;QT_SCREEN_SCALE_FACTORS=${scale}")
+endforeach()

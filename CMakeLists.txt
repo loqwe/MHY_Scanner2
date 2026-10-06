@@ -47,7 +47,7 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 set(OPENSSL_USE_STATIC_LIBS TRUE)
 find_package(OpenSSL REQUIRED)
 
-find_package(Qt6 COMPONENTS Widgets REQUIRED)
+find_package(Qt6 COMPONENTS Widgets Concurrent REQUIRED)
 
 #boost
 include_directories(${CMAKE_SOURCE_DIR}/3rdparty/boost)
@@ -112,6 +112,7 @@ set(PROJECT_LIBRARIES
 	# Qt6
 	Qt6::Core
 	Qt6::Widgets
+	Qt6::Concurrent
 
 	cpr::cpr
 	QR_Code_generator
@@ -160,6 +161,7 @@ set(QT_DLL_FILES
 	${QT6_INSTALL_PREFIX}/bin/Qt6Core.dll
 	${QT6_INSTALL_PREFIX}/bin/Qt6Widgets.dll
 	${QT6_INSTALL_PREFIX}/bin/Qt6Gui.dll
+	${QT6_INSTALL_PREFIX}/bin/Qt6Concurrent.dll
 )
 
 install(

@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <atomic>
+#include <mutex>
 #include <string_view>
 
 extern "C"
@@ -21,6 +22,8 @@ extern "C"
 #include "ApiDefs.hpp"
 #include "ConfigDate.h"
 #include "ScannerBase.hpp"
+#include "StreamTiming.hpp"
+#include <opencv2/core/mat.hpp>
 
 class QRCodeForStream final :
     public QThread,
@@ -43,6 +46,7 @@ public:
     void continueLastLogin();
 
 Q_SIGNALS:
+    void streamReady();
     void loginResults(const ScanRet ret);
     void loginConfirm(const GameType gameType, bool b);
 
@@ -51,6 +55,10 @@ private:
     void LoginOfficial();
     void LoginBH3BiliBili();
     void setStreamHW();
+    bool convertFrame(cv::Mat& img);
+    void scanFrame(const cv::Mat& img);
+    void submitFrame(cv::Mat img);
+    static int interruptStream(void* opaque);
     std::string streamUrl{};
     std::string m_name;
     ConfigDate* m_config;
@@ -65,7 +73,15 @@ private:
     int videoStreamIndex{ 0 };
     int videoStreamWidth{};
     int videoStreamHeight{};
-    const int threadNumber{ 2 };
+    int inputWidth{};
+    int inputHeight{};
+    int inputFormat{ AV_PIX_FMT_NONE };
+    const int threadNumber{ 3 };
+    cv::Mat pendingFrame;
+    StreamSubmitClock submitClock;
+    StreamDeadline readDeadline;
+    bool readyEmitted{ false };
     QThreadPool threadPool;
     std::atomic<bool> m_stop;
+    std::atomic<bool> m_cancelled{ false };
 };

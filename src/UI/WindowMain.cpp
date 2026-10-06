@@ -14,6 +14,7 @@
 #include <QLineEdit>
 #include <QMetaObject>
 #include <QPointer>
+#include <QSignalBlocker>
 
 #include "MhyApi.hpp"
 #include "BSGameSDK.hpp"
@@ -25,6 +26,7 @@ WindowMain::WindowMain(QWidget* parent) :
 {
     QApplication::setFont(QFont("微软雅黑", 9));
     ui.setupUi(this);
+    ui.spinConfirmDelay->setEnabled(false);
     connect(ui.action1_3, &QAction::triggered, this, &WindowMain::AddAccount);
     connect(ui.action1_4, &QAction::triggered, this, &WindowMain::SetDefaultAccount);
     connect(ui.action2_3, &QAction::triggered, this, &WindowMain::DeleteAccount);
@@ -62,12 +64,17 @@ WindowMain::WindowMain(QWidget* parent) :
     connect(ui.checkBoxAutoScreen, &QCheckBox::clicked, this, &WindowMain::checkBoxAutoScreen);
     connect(ui.checkBoxAutoExit, &QCheckBox::clicked, this, &WindowMain::checkBoxAutoExit);
     connect(ui.checkBoxAutoLogin, &QCheckBox::clicked, this, &WindowMain::checkBoxAutoLogin);
+    connect(ui.spinConfirmDelay, &QDoubleSpinBox::valueChanged, this, [this](double seconds) {
+        userinfo["confirm_delay_seconds"] = seconds;
+        m_config->updateConfig(userinfo.dump());
+    });
     connect(ui.pBtStream, &QPushButton::clicked, this, &WindowMain::pBtStream);
     connect(ui.tableWidget, &QTableWidget::cellClicked, this, &WindowMain::getInfo);
     connect(&t1, &QRCodeForScreen::loginResults, this, &WindowMain::islogin);
     connect(&t1, &QRCodeForScreen::loginConfirm, this, &WindowMain::loginConfirmTip);
     connect(&t2, &QRCodeForStream::loginResults, this, &WindowMain::islogin);
     connect(&t2, &QRCodeForStream::loginConfirm, this, &WindowMain::loginConfirmTip);
+    connect(&t2, &QRCodeForStream::streamReady, this, &WindowMain::StartScanLive);
     connect(&configinitload, &configInitLoad::userinfoTrue, this, &WindowMain::configInitUpdate);
     connect(ui.tableWidget, &QTableWidget::itemChanged, this, &WindowMain::updateNote);
 
@@ -82,26 +89,16 @@ WindowMain::WindowMain(QWidget* parent) :
            << "状态"
            << "备注";
     ui.tableWidget->setHorizontalHeaderLabels(header);
-    ui.tableWidget->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
-    ui.tableWidget->setColumnWidth(0, 35);
-    ui.tableWidget->setColumnWidth(1, 100);
-    ui.tableWidget->setColumnWidth(2, 100);
-    ui.tableWidget->setColumnWidth(3, 70);
-    ui.tableWidget->setColumnWidth(4, 70);
+    ui.tableWidget->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    ui.tableWidget->horizontalHeader()->setMinimumSectionSize(44);
+    ui.tableWidget->setColumnWidth(0, 44);
+    ui.tableWidget->setColumnWidth(1, 104);
+    ui.tableWidget->setColumnWidth(2, 110);
+    ui.tableWidget->setColumnWidth(3, 72);
+    ui.tableWidget->setColumnWidth(4, 72);
     ui.tableWidget->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
     ui.tableWidget->verticalHeader()->setVisible(false);
-    ui.tableWidget->horizontalHeader()->setFont(QFont("楷体", 11));
     ui.tableWidget->setAlternatingRowColors(true);
-
-    ui.tableWidget->horizontalHeader()->setStyleSheet(
-        "QHeaderView::section {"
-        "padding: 1px;"
-        "border: none;"
-        "border-bottom: 1px solid rgb(75, 120, 154);"
-        "border-right: 1px solid rgb(75, 120, 154);"
-        "background-color:#e2e6e7;"
-        "color:#333333;"
-        "}");
     ui.label_3->setText(MHY_Scanner_VERSION);
 
     ui.tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -126,6 +123,8 @@ WindowMain::WindowMain(QWidget* parent) :
 
 WindowMain::~WindowMain()
 {
+    confirmationDelay.cancel();
+    confirmationJob.waitForFinished();
     t1.stop();
     t2.stop();
 }
@@ -391,6 +390,11 @@ void WindowMain::AddAccount()
 
 void WindowMain::pBtstartScreen(bool clicked)
 {
+    if (confirmationDelay.pending())
+    {
+        pBtStop();
+        return;
+    }
     ui.pBtstartScreen->setEnabled(false);
     ui.pBtStream->setEnabled(false);
     ui.pBtstartScreen->setText("加载中。。。");
@@ -441,6 +445,11 @@ void WindowMain::pBtstartScreen(bool clicked)
 
 void WindowMain::pBtStream(bool clicked)
 {
+    if (confirmationDelay.pending())
+    {
+        pBtStop();
+        return;
+    }
     ui.pBtstartScreen->setEnabled(false);
     ui.pBtStream->setEnabled(false);
     ui.pBtStream->setText("加载中。。。");
@@ -474,6 +483,8 @@ void WindowMain::pBtStream(bool clicked)
         }
         else
         {
+            t2.stop();
+            t2.wait();
             t2.setUrl(stream_link, heards);
         }
         if (const std::string& type = userinfo["account"][countA]["type"]; type == "官服")
@@ -504,12 +515,12 @@ void WindowMain::pBtStream(bool clicked)
             t2.setLoginInfo(uid, stoken, result.uname);
         }
         t2.start();
-        emit StartScanLive();
     });
 }
 
 void WindowMain::closeEvent(QCloseEvent* event)
 {
+    confirmationDelay.cancel();
     saveLiveRoomId(ui.lineEditLiveId->currentText());
     t1.stop();
     t2.stop();
@@ -521,6 +532,7 @@ void WindowMain::showEvent(QShowEvent* event)
 
 void WindowMain::islogin(const ScanRet ret)
 {
+    const bool screenMonitoring = ui.pBtstartScreen->isChecked();
     if (ret == ScanRet::SUCCESS && (bool)userinfo["auto_exit"] == true)
     {
         exit(0);
@@ -549,7 +561,8 @@ void WindowMain::islogin(const ScanRet ret)
         Show_QMessageBox("提示", "直播中断!");
         break;
     case ScanRet::STREAMERROR:
-        Show_QMessageBox("提示", "直播流初始化失败!");
+        Show_QMessageBox("提示", screenMonitoring ? "屏幕捕获初始化或识别失败!"
+                                                   : "直播流初始化或解码失败!");
         break;
     case ScanRet::SUCCESS:
         Show_QMessageBox("提示", "扫码成功!");
@@ -561,6 +574,16 @@ void WindowMain::islogin(const ScanRet ret)
 
 void WindowMain::loginConfirmTip(const GameType gameType, bool b)
 {
+    if (confirmationDelay.pending() || confirmationJob.isRunning() ||
+        !(b ? ui.pBtstartScreen : ui.pBtStream)->isChecked())
+    {
+        return;
+    }
+    if (userinfo.value("auto_login", false))
+    {
+        scheduleConfirmation(b);
+        return;
+    }
     QString info("正在使用账号" + ui.lineEditUname->text());
     switch (gameType)
     {
@@ -594,15 +617,45 @@ void WindowMain::loginConfirmTip(const GameType gameType, bool b)
     {
         return;
     }
-    QThreadPool::globalInstance()->start([this, b] {
-        if (b)
-        {
-            t1.continueLastLogin();
-        }
-        else
-        {
-            t2.continueLastLogin();
-        }
+    scheduleConfirmation(b);
+}
+
+void WindowMain::scheduleConfirmation(bool screen)
+{
+    pBtStop();
+    ui.spinConfirmDelay->setEnabled(false);
+    auto* button = screen ? ui.pBtstartScreen : ui.pBtStream;
+    auto* other = screen ? ui.pBtStream : ui.pBtstartScreen;
+    button->setText("取消确认");
+    button->setChecked(true);
+    other->setEnabled(false);
+    const double seconds = ui.spinConfirmDelay->value();
+    confirmationDelay.schedule(seconds, [this, screen]() {
+        ui.pBtstartScreen->setEnabled(false);
+        ui.pBtStream->setEnabled(false);
+        auto* active = screen ? ui.pBtstartScreen : ui.pBtStream;
+        active->setText("确认登录中");
+        confirmationJob = QtConcurrent::run([this, screen]() {
+            // The QR worker must finish publishing its state before confirmation.
+            try
+            {
+                if (screen)
+                {
+                    t1.wait();
+                    t1.continueLastLogin();
+                }
+                else
+                {
+                    t2.wait();
+                    t2.continueLastLogin();
+                }
+            }
+            catch (const std::exception&)
+            {
+                WriteScannerLog("confirmation: login request failed");
+                QMetaObject::invokeMethod(this, [this]() { islogin(ScanRet::FAILURE_2); }, Qt::QueuedConnection);
+            }
+        });
     });
 }
 
@@ -824,6 +877,8 @@ void WindowMain::DeleteAccount()
 
 void WindowMain::pBtStop()
 {
+    confirmationDelay.cancel();
+    ui.spinConfirmDelay->setEnabled(true);
     t1.stop();
     t2.stop();
     ui.pBtstartScreen->setText("监视屏幕");
@@ -840,6 +895,11 @@ void WindowMain::configInitUpdate()
     try
     {
         userinfo = nlohmann::json::parse(m_config->getConfig());
+        {
+            const QSignalBlocker blocker(ui.spinConfirmDelay);
+            ui.spinConfirmDelay->setValue(ConfirmationDelayMs(userinfo.value("confirm_delay_seconds", 0.0)) / 1000.0);
+        }
+        ui.spinConfirmDelay->setEnabled(true);
         for (int i = 0; i < userinfo["num"].get<int>(); i++)
         {
             insertTableItems(

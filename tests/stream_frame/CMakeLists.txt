@@ -1,0 +1,48 @@
+cmake_minimum_required(VERSION 3.26)
+project(stream_frame_regression LANGUAGES CXX)
+
+set(FFMPEG_ROOT "" CACHE PATH "FFmpeg shared SDK directory")
+find_path(FFMPEG_INCLUDE libavutil/frame.h HINTS "${FFMPEG_ROOT}/include" REQUIRED)
+find_library(AVUTIL_LIBRARY avutil HINTS "${FFMPEG_ROOT}/lib" REQUIRED)
+find_library(SWSCALE_LIBRARY swscale HINTS "${FFMPEG_ROOT}/lib" REQUIRED)
+
+add_executable(test_stream_frame ../test_stream_frame.cpp)
+target_compile_features(test_stream_frame PRIVATE cxx_std_17)
+target_include_directories(test_stream_frame PRIVATE ../../src/Core)
+target_include_directories(test_stream_frame SYSTEM PRIVATE "${FFMPEG_INCLUDE}")
+target_link_libraries(test_stream_frame PRIVATE "${AVUTIL_LIBRARY}" "${SWSCALE_LIBRARY}")
+if(MSVC)
+    target_compile_options(test_stream_frame PRIVATE /W4 /WX /EHsc /utf-8)
+endif()
+
+file(GLOB FFMPEG_DLLS "${FFMPEG_ROOT}/bin/avutil-*.dll" "${FFMPEG_ROOT}/bin/swscale-*.dll")
+if(FFMPEG_DLLS)
+    add_custom_command(TARGET test_stream_frame POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FFMPEG_DLLS} "$<TARGET_FILE_DIR:test_stream_frame>")
+endif()
+enable_testing()
+add_test(NAME stream_frame_regression COMMAND test_stream_frame)
+
+add_executable(test_stream_timing ../test_stream_timing.cpp)
+target_compile_features(test_stream_timing PRIVATE cxx_std_17)
+target_include_directories(test_stream_timing PRIVATE ../../src/Core)
+add_test(NAME stream_timing_regression COMMAND test_stream_timing)
+
+find_library(AVFORMAT_LIBRARY avformat HINTS "${FFMPEG_ROOT}/lib" REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_executable(test_stream_interrupt ../test_stream_interrupt.cpp)
+target_compile_features(test_stream_interrupt PRIVATE cxx_std_17)
+target_include_directories(test_stream_interrupt PRIVATE ../../src/Core)
+target_include_directories(test_stream_interrupt SYSTEM PRIVATE "${FFMPEG_INCLUDE}")
+target_link_libraries(test_stream_interrupt PRIVATE "${AVFORMAT_LIBRARY}" "${AVUTIL_LIBRARY}")
+file(GLOB FFMPEG_READ_DLLS "${FFMPEG_ROOT}/bin/*.dll")
+add_custom_command(TARGET test_stream_interrupt POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FFMPEG_READ_DLLS} "$<TARGET_FILE_DIR:test_stream_interrupt>")
+if(MSVC)
+    target_compile_options(test_stream_timing PRIVATE /W4 /WX /EHsc /utf-8)
+    target_compile_options(test_stream_interrupt PRIVATE /W4 /WX /EHsc /utf-8)
+endif()
+add_test(NAME stream_interrupt_regression
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../test_stream_interrupt.py"
+            "$<TARGET_FILE:test_stream_interrupt>")
+set_tests_properties(stream_interrupt_regression PROPERTIES TIMEOUT 15)
