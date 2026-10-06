@@ -1,6 +1,6 @@
 ﻿cmake_minimum_required(VERSION 3.26)
 project(MHY_Scanner
-	VERSION 1.16.1
+	VERSION 1.16.2
 	LANGUAGES CXX
 )
 

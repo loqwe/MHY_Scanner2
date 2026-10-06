@@ -39,26 +39,37 @@ template-only usage does not add a Qt6Concurrent.dll import to the EXE.
 
 ## Generated Artifacts
 
-- ../MHY_Scanner.PR212-delay-ui.exe: new aligned UI EXE alongside the untouched original.
-  It uses the existing matching Qt 6.8.0 and FFmpeg 63/61/10 DLLs and ScanModel.
-- install-ui/MHY_Scanner_1.16.1: independent directory with SDK-matched runtime
+- ../MHY_Scanner_v1.16.2.exe: versioned EXE with malformed live-packet recovery.
+  It can use the original compatible Qt 6.8.0 and FFmpeg 63/61/10 DLLs and ScanModel.
+- install-ui/MHY_Scanner_1.16.2: independent directory with SDK-matched runtime
   DLLs, Qt plugins, models and the matching PDB. No account configuration is copied.
-- ../MHY_Scanner.PR212-delay-ui.portable.zip: portable package without the large
+- ../MHY_Scanner_v1.16.2.zip: portable package without the large
   PDB. The matching PDB remains in the install directory.
-- ../pr212-delay-ui-build.patch: cumulative source diff from the local base,
-  including the preceding Issue #3 repair, PR core port, confirmation delay and UI.
+- ../MHY_Scanner_v1.16.2.patch: incremental source diff from commit 96ef29d,
+  fixing decode recovery and updating versions, tests and build documentation.
 
-EXE SHA-256: 673BCD6778122177B29FD93E3DC6A918CD9D649D3163FADE73608FDEAE77C6CE.
+EXE SHA-256: 69DBB11CCC033D9386962FACFAECE9FB1E030E866C10120FC34DBCBCF6AFBEB8.
 The original EXE SHA-256 is unchanged:
 85894EF7545F632AD5EF6FF4BB112C9A11B88B9D4A4CF8E6C866A577EBCBAEF4.
 
-Verified for the UI build: full application configure/build/install; 15 source
-integration guards; nine C++/Qt regression tests; real models decoding synthetic
+Verified for v1.16.2: full application configure/build/install; 19 source
+integration guards; ten C++/Qt regression tests; real models decoding synthetic
 QR codes; PE imports resolving for 14 local modules in each runtime directory.
 UI checks and screenshots cover three window sizes and three confirmation states
 at 125%, 150% and 200% DPI. See UI_LAYOUT.md.
 
-The earlier delay build passed isolated 3-second startup checks. The UI build's
+Actual H.264 encode/decode reproduces error -1094995529 and resumes decoding
+valid keyframes with the same decoder. This also passes with the original
+application's DLLs, which differ in hash from the packaged SDK DLLs. The bounded
+no-valid-frame timeout is retained. See FIX_v1.16.2.md.
+
+Every subsequent redistributed build must increment the version and keep CMake,
+Windows resources, displayed version, artifact names and release tag aligned.
+tests/test_release_version.py guards the source metadata and UI test fixture.
+For this manual release, the tag-triggered build is cancelled so it cannot
+replace the verified package. The publishing credential cannot edit workflows.
+
+The earlier delay build passed isolated 3-second startup checks. This build's
 startup smoke check is deferred because the user's earlier instance is running;
 it is not stopped or replaced. Real GPU capture, live-room scanning and account
 confirmation are not tested against user accounts. Old EXEs, packages, patches

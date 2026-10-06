@@ -82,6 +82,13 @@ void QRCodeForStream::LoginOfficial()
             continue;
         }
         const int sendResult = avcodec_send_packet(pAVCodecContext, pAVPacket);
+        // A malformed live packet is recoverable; only valid frames reset the deadline.
+        if (sendResult == AVERROR_INVALIDDATA)
+        {
+            WriteScannerLog("stream: skipping invalid video packet");
+            av_packet_unref(pAVPacket);
+            continue;
+        }
         if (sendResult < 0)
         {
             WriteScannerLog("stream: send packet error=" + std::to_string(sendResult));
@@ -96,8 +103,24 @@ void QRCodeForStream::LoginOfficial()
             break;
         }
         int receiveResult = AVERROR(EAGAIN);
-        while (m_stop.load() && (receiveResult = avcodec_receive_frame(pAVCodecContext, pAVFrame)) == 0)
+        while (m_stop.load())
         {
+            receiveResult = avcodec_receive_frame(pAVCodecContext, pAVFrame);
+            if (receiveResult == AVERROR_INVALIDDATA)
+            {
+                WriteScannerLog("stream: skipping invalid decoded frame");
+                if (readDeadline.expired(av_gettime_relative()))
+                {
+                    ret = ScanRet::STREAMERROR;
+                    stop();
+                    break;
+                }
+                continue;
+            }
+            if (receiveResult < 0)
+            {
+                break;
+            }
             cv::Mat img;
             if (!convertFrame(img))
             {
@@ -111,7 +134,8 @@ void QRCodeForStream::LoginOfficial()
 #endif
             submitFrame(std::move(img));
         }
-        if (m_stop.load() && receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF)
+        if (m_stop.load() && receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF &&
+            receiveResult != AVERROR_INVALIDDATA)
         {
             WriteScannerLog("stream: receive frame error=" + std::to_string(receiveResult));
             ret = ScanRet::STREAMERROR;
@@ -146,6 +170,12 @@ void QRCodeForStream::LoginBH3BiliBili()
             continue;
         }
         const int sendResult = avcodec_send_packet(pAVCodecContext, pAVPacket);
+        if (sendResult == AVERROR_INVALIDDATA)
+        {
+            WriteScannerLog("stream: skipping invalid video packet");
+            av_packet_unref(pAVPacket);
+            continue;
+        }
         if (sendResult < 0)
         {
             WriteScannerLog("stream: send packet error=" + std::to_string(sendResult));
@@ -161,8 +191,24 @@ void QRCodeForStream::LoginBH3BiliBili()
         }
 
         int receiveResult = AVERROR(EAGAIN);
-        while (m_stop.load() && (receiveResult = avcodec_receive_frame(pAVCodecContext, pAVFrame)) == 0)
+        while (m_stop.load())
         {
+            receiveResult = avcodec_receive_frame(pAVCodecContext, pAVFrame);
+            if (receiveResult == AVERROR_INVALIDDATA)
+            {
+                WriteScannerLog("stream: skipping invalid decoded frame");
+                if (readDeadline.expired(av_gettime_relative()))
+                {
+                    ret = ScanRet::STREAMERROR;
+                    stop();
+                    break;
+                }
+                continue;
+            }
+            if (receiveResult < 0)
+            {
+                break;
+            }
             cv::Mat img;
             if (!convertFrame(img))
             {
@@ -176,7 +222,8 @@ void QRCodeForStream::LoginBH3BiliBili()
 #endif
             submitFrame(std::move(img));
         }
-        if (m_stop.load() && receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF)
+        if (m_stop.load() && receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF &&
+            receiveResult != AVERROR_INVALIDDATA)
         {
             WriteScannerLog("stream: receive frame error=" + std::to_string(receiveResult));
             ret = ScanRet::STREAMERROR;

@@ -10,6 +10,31 @@ SOURCE = (ROOT / "src/UI/QRCodeForStream.cpp").read_text(encoding="utf-8-sig")
 
 
 class StreamSafetyTests(unittest.TestCase):
+    def test_both_paths_skip_invalid_video_packets(self):
+        branches = SOURCE.split("if (sendResult == AVERROR_INVALIDDATA)")[1:]
+        self.assertEqual(len(branches), 2)
+        for branch in branches:
+            recover = branch.split("continue;", 1)[0]
+            self.assertIn("av_packet_unref(pAVPacket)", recover)
+            self.assertNotIn("ret = ScanRet::STREAMERROR", recover)
+            self.assertNotIn("stop()", recover)
+
+    def test_both_paths_skip_invalid_decoded_frames(self):
+        self.assertEqual(SOURCE.count("receiveResult != AVERROR_INVALIDDATA"), 2)
+        self.assertEqual(SOURCE.count("stream: skipping invalid decoded frame"), 2)
+        branches = SOURCE.split("if (receiveResult == AVERROR_INVALIDDATA)")[1:]
+        self.assertEqual(len(branches), 2)
+        for branch in branches:
+            recovery = branch.split("cv::Mat img", 1)[0]
+            self.assertIn("continue;", recovery)
+            self.assertIn("readDeadline.expired", recovery)
+
+    def test_only_valid_frames_refresh_read_deadline(self):
+        loops = SOURCE.split("void QRCodeForStream::LoginOfficial()", 1)[1].split(
+            "int QRCodeForStream::interruptStream", 1
+        )[0]
+        self.assertNotIn("readDeadline.refresh", loops)
+
     def test_scaler_is_not_created_before_first_decoded_frame(self):
         init = SOURCE.split("auto QRCodeForStream::init()", 1)[1].split(
             "void QRCodeForStream::continueLastLogin", 1

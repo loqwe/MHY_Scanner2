@@ -8,8 +8,9 @@ Local base: loqwe/MHY_Scanner2 d07fc8018414e2b54962264517d8344601d825f2.
 ## Scope
 
 This is an adapted core port, not a replacement with the upstream branch.
-The upstream PR's UI, branding and dialogs are not imported. The local version
-and dialogs are preserved. The main window was subsequently redesigned at the
+The upstream PR's UI, branding and dialogs are not imported. Local dialogs are
+preserved; the subsequent decode repair increments the version to 1.16.2.
+The main window was subsequently redesigned at the
 user's request with an aligned, resizable local layout; see UI_LAYOUT.md.
 The source also retains the preceding Issue #3 frame-conversion repair.
 The later user-requested confirmation delay adds a seconds input;

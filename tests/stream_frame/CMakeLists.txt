@@ -46,3 +46,16 @@ add_test(NAME stream_interrupt_regression
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../test_stream_interrupt.py"
             "$<TARGET_FILE:test_stream_interrupt>")
 set_tests_properties(stream_interrupt_regression PROPERTIES TIMEOUT 15)
+
+find_library(AVCODEC_LIBRARY avcodec HINTS "${FFMPEG_ROOT}/lib" REQUIRED)
+add_executable(test_stream_decode_recovery ../test_stream_decode_recovery.cpp)
+target_compile_features(test_stream_decode_recovery PRIVATE cxx_std_17)
+target_include_directories(test_stream_decode_recovery PRIVATE ../../src/Core)
+target_include_directories(test_stream_decode_recovery SYSTEM PRIVATE "${FFMPEG_INCLUDE}")
+target_link_libraries(test_stream_decode_recovery PRIVATE "${AVCODEC_LIBRARY}" "${AVUTIL_LIBRARY}")
+if(MSVC)
+    target_compile_options(test_stream_decode_recovery PRIVATE /W4 /WX /EHsc /utf-8)
+endif()
+add_custom_command(TARGET test_stream_decode_recovery POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FFMPEG_READ_DLLS} "$<TARGET_FILE_DIR:test_stream_decode_recovery>")
+add_test(NAME stream_decode_recovery_regression COMMAND test_stream_decode_recovery)

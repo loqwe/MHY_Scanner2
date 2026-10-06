@@ -32,6 +32,8 @@ but is not a live-account capture. Full application build and PE dependency
 checks pass. A new startup smoke check is deferred while the user's previous
 EXE holds the single-instance mutex. No user process is stopped.
 
-Outputs: ../MHY_Scanner.PR212-delay-ui.exe,
-../MHY_Scanner.PR212-delay-ui.portable.zip and
-../pr212-delay-ui-build.patch. All previous artifacts are retained.
+Current outputs: ../MHY_Scanner_v1.16.2.exe,
+../MHY_Scanner_v1.16.2.zip and ../MHY_Scanner_v1.16.2.patch.
+The displayed and Windows resource versions are both 1.16.2.
+All previous local artifacts are retained; the faulty GitHub test release
+was removed at the user's request.
